@@ -252,8 +252,14 @@ rgc-cli --doctor --json
 
 1. **`list_monitors`**: 枚举所有屏幕、分辨率与 DPI 缩放系数。
 2. **`capture_screen`**: 捕获指定屏幕或局部区域，支持直接返回 Base64 编码图片数据（`image/png`, `image/webp`, `image/jpeg`）或落盘至本地文件。
-   - 参数：`monitor` (整数/字符串), `region` (字符串 `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `outputPath` (字符串), `returnBase64` (布尔值)。
+   - 参数：`monitor` (整数/字符串), `region` (字符串 `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `scale` (浮点数 `0.01..1.0`), `maxDimension` (最大像素 `>0`), `quality` (压缩质量 `1..100`), `outputPath` (字符串), `returnBase64` (布尔值)。
 3. **`doctor`**: 诊断检查当前图形显示子系统与捕获就绪状态。
+
+### 提供的 MCP 资源 (Resources) 列表
+
+1. **`screen://current`**: 当前主显示器画面的实时快照（`image/png` Base64 二进制资源）。
+2. **`screen://monitor/{index}`**: 动态捕获指定索引显示器的实时画面（如 `screen://monitor/0`）。
+3. **`screen://diagnostics`**: 图形与捕获子系统环境就绪诊断报告（JSON 文本资源）。
 
 ### 客户端接入配置示例
 

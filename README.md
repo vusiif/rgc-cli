@@ -252,8 +252,14 @@ Output:
 
 1. **`list_monitors`**: Enumerate all connected screens, resolutions, and DPI scale factors.
 2. **`capture_screen`**: Capture screen or cropped region with direct base64 image payload (`image/png`, `image/webp`, `image/jpeg`) or output file.
-   - Arguments: `monitor` (int/str), `region` (string `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `outputPath` (string), `returnBase64` (bool).
+   - Arguments: `monitor` (int/str), `region` (string `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `scale` (number `0.01..1.0`), `maxDimension` (int `>0`), `quality` (int `1..100`), `outputPath` (string), `returnBase64` (bool).
 3. **`doctor`**: Diagnostic check of display subsystem, active backend, and clipboard capabilities.
+
+### Exposed MCP Resources
+
+1. **`screen://current`**: Live snapshot of the primary display (`image/png` binary blob).
+2. **`screen://monitor/{index}`**: Dynamic snapshot of a specific display monitor by zero-based index (e.g. `screen://monitor/0`).
+3. **`screen://diagnostics`**: Machine-readable JSON diagnostic report of hardware, display server, and capture subsystem.
 
 ### Client Configuration Examples
 

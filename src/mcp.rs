@@ -79,8 +79,11 @@ pub struct InitializeResult {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerCapabilities {
     pub tools: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,6 +103,63 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResourceListResult {
+    pub resources: Vec<ResourceDefinition>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceDefinition {
+    pub uri: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceTemplatesListResult {
+    pub resource_templates: Vec<ResourceTemplateDefinition>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceTemplateDefinition {
+    pub uri_template: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResourceReadResult {
+    pub contents: Vec<ResourceContent>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum ResourceContent {
+    #[serde(rename_all = "camelCase")]
+    Text {
+        uri: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        text: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Blob {
+        uri: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        blob: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -168,6 +228,10 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
                     protocol_version: "2024-11-05".to_string(),
                     capabilities: ServerCapabilities {
                         tools: serde_json::json!({}),
+                        resources: Some(serde_json::json!({
+                            "subscribe": false,
+                            "listChanged": false,
+                        })),
                     },
                     server_info: ServerInfo {
                         name: "rgc-cli".to_string(),
@@ -282,6 +346,108 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
             };
             serde_json::to_string(&res).ok()
         }
+        "resources/list" => {
+            let mut resources = vec![ResourceDefinition {
+                uri: "screen://current".to_string(),
+                name: "Current Primary Screen".to_string(),
+                description: Some(
+                    "Live snapshot of the current primary display in PNG format".to_string(),
+                ),
+                mime_type: Some("image/png".to_string()),
+            }];
+
+            if let Ok(monitors) = capture::get_monitor_infos() {
+                for m in monitors {
+                    resources.push(ResourceDefinition {
+                        uri: format!("screen://monitor/{}", m.index),
+                        name: format!("Monitor #{} ({})", m.index, m.name),
+                        description: Some(format!(
+                            "Live snapshot of monitor #{} ({}x{} @ {:.2}x{})",
+                            m.index,
+                            m.width,
+                            m.height,
+                            m.scale_factor,
+                            if m.is_primary { " [Primary]" } else { "" }
+                        )),
+                        mime_type: Some("image/png".to_string()),
+                    });
+                }
+            }
+
+            resources.push(ResourceDefinition {
+                uri: "screen://diagnostics".to_string(),
+                name: "System Diagnostics Report".to_string(),
+                description: Some(
+                    "Live display and graphics capture subsystem diagnostic report in JSON format"
+                        .to_string(),
+                ),
+                mime_type: Some("application/json".to_string()),
+            });
+
+            let res = JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: ResourceListResult { resources },
+            };
+            serde_json::to_string(&res).ok()
+        }
+        "resources/templates/list" => {
+            let templates = vec![ResourceTemplateDefinition {
+                uri_template: "screen://monitor/{index}".to_string(),
+                name: "Monitor Display Snapshot".to_string(),
+                description: Some(
+                    "Capture a live snapshot of a specific monitor by zero-based numeric index (e.g. screen://monitor/0)".to_string(),
+                ),
+                mime_type: Some("image/png".to_string()),
+            }];
+
+            let res = JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: ResourceTemplatesListResult {
+                    resource_templates: templates,
+                },
+            };
+            serde_json::to_string(&res).ok()
+        }
+        "resources/read" => {
+            let uri = req.params.get("uri").and_then(|v| v.as_str());
+            let uri = match uri {
+                Some(u) => u,
+                None => {
+                    let err = JsonRpcErrorResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        error: JsonRpcError {
+                            code: -32602,
+                            message: "Missing 'uri' parameter in resources/read request"
+                                .to_string(),
+                            data: None,
+                        },
+                    };
+                    return serde_json::to_string(&err).ok();
+                }
+            };
+
+            match read_resource(uri) {
+                Ok(read_result) => {
+                    let res = JsonRpcResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: read_result,
+                    };
+                    serde_json::to_string(&res).ok()
+                }
+                Err(err) => {
+                    let err_res = JsonRpcErrorResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        error: err,
+                    };
+                    serde_json::to_string(&err_res).ok()
+                }
+            }
+        }
         _ => {
             let err = JsonRpcErrorResponse {
                 jsonrpc: "2.0",
@@ -294,6 +460,81 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
             };
             serde_json::to_string(&err).ok()
         }
+    }
+}
+
+fn read_resource(uri: &str) -> Result<ResourceReadResult, JsonRpcError> {
+    if uri == "screen://current" || uri == "screen://primary" {
+        let image =
+            capture::capture_screen(None, None, CoordMode::Logical).map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Failed to capture current screen for '{uri}': {e}"),
+                data: None,
+            })?;
+        let bytes = output::encode_image_bytes(&image, ImageFormat::Png, None).map_err(|e| {
+            JsonRpcError {
+                code: -32000,
+                message: format!("Failed to encode image to PNG: {e}"),
+                data: None,
+            }
+        })?;
+        let blob = base64_encode(&bytes);
+        Ok(ResourceReadResult {
+            contents: vec![ResourceContent::Blob {
+                uri: uri.to_string(),
+                mime_type: Some("image/png".to_string()),
+                blob,
+            }],
+        })
+    } else if let Some(idx_str) = uri.strip_prefix("screen://monitor/") {
+        let monitor_idx: usize = idx_str.trim().parse().map_err(|_| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid monitor index '{idx_str}' in URI '{uri}'"),
+            data: None,
+        })?;
+        let image =
+            capture::capture_screen(Some(monitor_idx), None, CoordMode::Logical).map_err(|e| {
+                JsonRpcError {
+                    code: -32000,
+                    message: format!("Failed to capture monitor #{monitor_idx} for '{uri}': {e}"),
+                    data: None,
+                }
+            })?;
+        let bytes = output::encode_image_bytes(&image, ImageFormat::Png, None).map_err(|e| {
+            JsonRpcError {
+                code: -32000,
+                message: format!("Failed to encode image to PNG: {e}"),
+                data: None,
+            }
+        })?;
+        let blob = base64_encode(&bytes);
+        Ok(ResourceReadResult {
+            contents: vec![ResourceContent::Blob {
+                uri: uri.to_string(),
+                mime_type: Some("image/png".to_string()),
+                blob,
+            }],
+        })
+    } else if uri == "screen://diagnostics" || uri == "screen://doctor" {
+        let report = doctor::run_doctor();
+        let text = serde_json::to_string_pretty(&report).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to serialize diagnostics report: {e}"),
+            data: None,
+        })?;
+        Ok(ResourceReadResult {
+            contents: vec![ResourceContent::Text {
+                uri: uri.to_string(),
+                mime_type: Some("application/json".to_string()),
+                text,
+            }],
+        })
+    } else {
+        Err(JsonRpcError {
+            code: -32002,
+            message: format!("Resource not found: '{uri}'"),
+            data: None,
+        })
     }
 }
 
@@ -738,6 +979,61 @@ mod tests {
         let resp_quality = handle_mcp_message(req_quality).expect("response expected");
         assert!(resp_quality.contains(r#""isError":true"#));
         assert!(resp_quality.contains("Invalid quality"));
+    }
+
+    #[test]
+    fn test_handle_mcp_resources_list() {
+        let req = r#"{"jsonrpc":"2.0","id":20,"method":"resources/list"}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains("screen://current"));
+        assert!(resp.contains("screen://diagnostics"));
+        assert!(resp.contains("image/png"));
+        assert!(resp.contains("application/json"));
+    }
+
+    #[test]
+    fn test_handle_mcp_resources_templates_list() {
+        let req = r#"{"jsonrpc":"2.0","id":21,"method":"resources/templates/list"}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains("screen://monitor/{index}"));
+        assert!(resp.contains("image/png"));
+    }
+
+    #[test]
+    fn test_handle_mcp_resources_read_diagnostics() {
+        let req = r#"{"jsonrpc":"2.0","id":22,"method":"resources/read","params":{"uri":"screen://diagnostics"}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""uri":"screen://diagnostics""#));
+        assert!(resp.contains(r#""mimeType":"application/json""#));
+        assert!(
+            resp.contains("supportedFormats")
+                || resp.contains("operatingSystem")
+                || resp.contains("backend")
+        );
+    }
+
+    #[test]
+    fn test_handle_mcp_resources_read_missing_uri() {
+        let req = r#"{"jsonrpc":"2.0","id":23,"method":"resources/read","params":{}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""code":-32602"#));
+        assert!(resp.contains("Missing 'uri' parameter"));
+    }
+
+    #[test]
+    fn test_handle_mcp_resources_read_not_found() {
+        let req = r#"{"jsonrpc":"2.0","id":24,"method":"resources/read","params":{"uri":"unknown://resource"}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""code":-32002"#));
+        assert!(resp.contains("Resource not found"));
+    }
+
+    #[test]
+    fn test_handle_mcp_resources_read_invalid_monitor() {
+        let req = r#"{"jsonrpc":"2.0","id":25,"method":"resources/read","params":{"uri":"screen://monitor/not_a_number"}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""code":-32602"#));
+        assert!(resp.contains("Invalid monitor index"));
     }
 
     #[test]
