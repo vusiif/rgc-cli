@@ -258,20 +258,70 @@ fn run(args: Cli) -> Result<(), ApiError> {
         }
     }
 
-    // 4. Perform capture with window selection OR monitor selection with optional region cropping
-    let dynamic_image = if let Some(ref win_query) = args.window {
+    // 4. Perform capture with all-monitors panorama, window selection, or single monitor selection
+    let (dynamic_image, scale_factor, crop_offset, monitor_origin) = if args.all_monitors {
+        debug!(
+            "Initiating all-monitors panorama capture (region={:?}, coords={:?})",
+            args.region, args.coords
+        );
+        let captured =
+            capture::capture_all_monitors_with_details(args.region.as_ref(), args.coords)?;
+        (
+            captured.image,
+            captured.scale_factor,
+            captured.crop_offset,
+            Some(captured.monitor_origin),
+        )
+    } else if let Some(ref win_query) = args.window {
         debug!(
             "Initiating window capture (query={:?}, region={:?})",
             win_query, args.region
         );
-        capture::capture_window_with_crop(win_query, args.region.as_ref())?
+        let captured = capture::capture_window_with_details(win_query, args.region.as_ref())?;
+        (
+            captured.image,
+            captured.scale_factor,
+            captured.crop_offset,
+            None,
+        )
     } else {
         debug!(
             "Initiating monitor capture (monitor={:?}, region={:?}, coords={:?})",
             args.monitor, args.region, args.coords
         );
-        capture::capture_screen(args.monitor, args.region.as_ref(), args.coords)?
+        let captured =
+            capture::capture_screen_with_details(args.monitor, args.region.as_ref(), args.coords)?;
+        (
+            captured.image,
+            captured.scale_factor,
+            captured.crop_offset,
+            Some(captured.monitor_origin),
+        )
     };
+
+    // 4.1 Apply privacy redaction masks (transparent hole, blackout, pixelate, blur) before scaling
+    let dynamic_image = if !args.mask.is_empty() || !args.mask_window.is_empty() {
+        let windows = if !args.mask_window.is_empty() {
+            capture::get_windows().ok()
+        } else {
+            None
+        };
+        let redactions = capture::build_redactions(
+            dynamic_image.width(),
+            dynamic_image.height(),
+            scale_factor,
+            crop_offset,
+            monitor_origin,
+            args.coords,
+            &args.mask,
+            &args.mask_window,
+            windows.as_deref(),
+        );
+        output::apply_redactions(dynamic_image, &redactions)
+    } else {
+        dynamic_image
+    };
+
     let dynamic_image =
         output::apply_image_transforms(dynamic_image, args.scale, args.max_dimension);
     let img_width = dynamic_image.width();

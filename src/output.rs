@@ -535,6 +535,130 @@ pub fn resolve_output_path(
     }
 }
 
+pub use crate::cli::MaskEffect;
+
+/// Apply a single redaction mask to an RGBA image in-place.
+pub fn apply_redaction(
+    img: &mut image::RgbaImage,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    effect: MaskEffect,
+) {
+    let img_w = img.width();
+    let img_h = img.height();
+
+    // Defensive clipping to image boundaries
+    let x0 = x.min(img_w);
+    let y0 = y.min(img_h);
+    let x1 = (x.saturating_add(width)).min(img_w);
+    let y1 = (y.saturating_add(height)).min(img_h);
+
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+
+    match effect {
+        MaskEffect::Transparent => {
+            // Set Alpha to 0 (completely transparent hole)
+            for py in y0..y1 {
+                for px in x0..x1 {
+                    img.put_pixel(px, py, image::Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+        MaskEffect::Blackout => {
+            // Set RGB to 0, Alpha to 255 (solid black box)
+            for py in y0..y1 {
+                for px in x0..x1 {
+                    img.put_pixel(px, py, image::Rgba([0, 0, 0, 255]));
+                }
+            }
+        }
+        MaskEffect::Pixelate => {
+            let block_size: u32 = 12;
+            let mut by = y0;
+            while by < y1 {
+                let mut bx = x0;
+                let b_h = (by + block_size).min(y1) - by;
+                while bx < x1 {
+                    let b_w = (bx + block_size).min(x1) - bx;
+                    let count = (b_w * b_h) as u64;
+
+                    // Compute average RGBA across block
+                    let mut r_sum = 0u64;
+                    let mut g_sum = 0u64;
+                    let mut b_sum = 0u64;
+                    let mut a_sum = 0u64;
+
+                    for py in by..(by + b_h) {
+                        for px in bx..(bx + b_w) {
+                            let p = img.get_pixel(px, py);
+                            r_sum += p[0] as u64;
+                            g_sum += p[1] as u64;
+                            b_sum += p[2] as u64;
+                            a_sum += p[3] as u64;
+                        }
+                    }
+
+                    let avg_pixel = image::Rgba([
+                        (r_sum / count) as u8,
+                        (g_sum / count) as u8,
+                        (b_sum / count) as u8,
+                        (a_sum / count) as u8,
+                    ]);
+
+                    for py in by..(by + b_h) {
+                        for px in bx..(bx + b_w) {
+                            img.put_pixel(px, py, avg_pixel);
+                        }
+                    }
+
+                    bx += block_size;
+                }
+                by += block_size;
+            }
+        }
+        MaskEffect::Blur => {
+            let rw = x1 - x0;
+            let rh = y1 - y0;
+            let sub = image::imageops::crop_imm(img, x0, y0, rw, rh).to_image();
+            let down_w = (rw / 8).max(1);
+            let down_h = (rh / 8).max(1);
+            let downscaled = image::imageops::resize(
+                &sub,
+                down_w,
+                down_h,
+                image::imageops::FilterType::Triangle,
+            );
+            let blurred =
+                image::imageops::resize(&downscaled, rw, rh, image::imageops::FilterType::Triangle);
+            image::imageops::overlay(img, &blurred, x0 as i64, y0 as i64);
+        }
+    }
+}
+
+/// Apply a list of redaction masks to a DynamicImage.
+pub fn apply_redactions(
+    image: DynamicImage,
+    masks: &[(u32, u32, u32, u32, MaskEffect)],
+) -> DynamicImage {
+    if masks.is_empty() {
+        return image;
+    }
+
+    let mut rgba = image.into_rgba8();
+    for &(x, y, w, h, effect) in masks {
+        debug!(
+            "Applying redaction: x={}, y={}, w={}, h={}, effect={:?}",
+            x, y, w, h, effect
+        );
+        apply_redaction(&mut rgba, x, y, w, h, effect);
+    }
+    DynamicImage::ImageRgba8(rgba)
+}
+
 /// Save a `DynamicImage` to the filesystem destination with optional JPEG quality.
 pub fn save_image(
     image: &DynamicImage,
@@ -783,6 +907,77 @@ mod tests {
         let unchanged = apply_image_transforms(img, None, None);
         assert_eq!(unchanged.width(), 100);
         assert_eq!(unchanged.height(), 50);
+    }
+
+    #[test]
+    fn test_apply_redaction_transparent() {
+        let mut img = RgbaImage::from_pixel(100, 100, image::Rgba([255, 0, 0, 255]));
+        apply_redaction(&mut img, 10, 10, 20, 20, MaskEffect::Transparent);
+
+        // Inside masked hole: alpha should be 0
+        assert_eq!(img.get_pixel(10, 10), &image::Rgba([0, 0, 0, 0]));
+        assert_eq!(img.get_pixel(29, 29), &image::Rgba([0, 0, 0, 0]));
+
+        // Outside masked hole: should still be original red
+        assert_eq!(img.get_pixel(9, 9), &image::Rgba([255, 0, 0, 255]));
+        assert_eq!(img.get_pixel(30, 30), &image::Rgba([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn test_apply_redaction_blackout() {
+        let mut img = RgbaImage::from_pixel(100, 100, image::Rgba([255, 255, 255, 255]));
+        apply_redaction(&mut img, 5, 5, 10, 10, MaskEffect::Blackout);
+
+        // Inside masked hole: solid black
+        assert_eq!(img.get_pixel(5, 5), &image::Rgba([0, 0, 0, 255]));
+        assert_eq!(img.get_pixel(14, 14), &image::Rgba([0, 0, 0, 255]));
+
+        // Outside masked hole: white
+        assert_eq!(img.get_pixel(4, 4), &image::Rgba([255, 255, 255, 255]));
+        assert_eq!(img.get_pixel(15, 15), &image::Rgba([255, 255, 255, 255]));
+    }
+
+    #[test]
+    fn test_apply_redaction_pixelate_and_blur() {
+        let mut img = RgbaImage::new(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                img.put_pixel(x, y, image::Rgba([(x * 2) as u8, (y * 2) as u8, 128, 255]));
+            }
+        }
+
+        // Test pixelate
+        apply_redaction(&mut img, 10, 10, 30, 30, MaskEffect::Pixelate);
+        // Pixels within the same 12x12 block should have identical color
+        let p1 = *img.get_pixel(10, 10);
+        let p2 = *img.get_pixel(15, 15);
+        assert_eq!(p1, p2);
+
+        // Test blur
+        apply_redaction(&mut img, 50, 50, 40, 40, MaskEffect::Blur);
+
+        // Test out of bounds / zero dimension defense
+        apply_redaction(&mut img, 200, 200, 50, 50, MaskEffect::Transparent);
+        apply_redaction(&mut img, 10, 10, 0, 0, MaskEffect::Transparent);
+    }
+
+    #[test]
+    fn test_apply_redactions_wrapper() {
+        let img = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            50,
+            50,
+            image::Rgba([100, 100, 100, 255]),
+        ));
+        let masks = vec![
+            (0, 0, 10, 10, MaskEffect::Transparent),
+            (20, 20, 10, 10, MaskEffect::Blackout),
+        ];
+        let redacted = apply_redactions(img, &masks);
+        let rgba = redacted.into_rgba8();
+
+        assert_eq!(rgba.get_pixel(0, 0), &image::Rgba([0, 0, 0, 0]));
+        assert_eq!(rgba.get_pixel(20, 20), &image::Rgba([0, 0, 0, 255]));
+        assert_eq!(rgba.get_pixel(40, 40), &image::Rgba([100, 100, 100, 255]));
     }
 
     #[test]

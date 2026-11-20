@@ -58,6 +58,92 @@ pub enum CoordMode {
     Physical,
 }
 
+/// Redaction and masking effects for privacy-sensitive regions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MaskEffect {
+    #[default]
+    Transparent,
+    Blackout,
+    Pixelate,
+    Blur,
+}
+
+impl FromStr for MaskEffect {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "transparent" | "clear" | "alpha" => Ok(MaskEffect::Transparent),
+            "blackout" | "black" | "solid" => Ok(MaskEffect::Blackout),
+            "pixelate" | "mosaic" => Ok(MaskEffect::Pixelate),
+            "blur" | "gaussian" => Ok(MaskEffect::Blur),
+            other => Err(format!(
+                "Invalid mask effect '{other}': expected 'transparent', 'blackout', 'pixelate', or 'blur'"
+            )),
+        }
+    }
+}
+
+/// A rectangular region with an associated redaction effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaskRegion {
+    pub region: Region,
+    pub effect: MaskEffect,
+}
+
+impl FromStr for MaskRegion {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        if let Some((reg_str, effect_str)) = trimmed.rsplit_once(':') {
+            let effect = MaskEffect::from_str(effect_str)?;
+            let region = Region::from_str(reg_str)?;
+            Ok(MaskRegion { region, effect })
+        } else {
+            let region = Region::from_str(trimmed)?;
+            Ok(MaskRegion {
+                region,
+                effect: MaskEffect::Transparent,
+            })
+        }
+    }
+}
+
+/// A window target with an associated redaction effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaskWindow {
+    pub query: String,
+    pub effect: MaskEffect,
+}
+
+impl FromStr for MaskWindow {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err("Mask window target cannot be empty".to_string());
+        }
+
+        if let Some((left, right)) = trimmed.rsplit_once(':') {
+            if let Ok(effect) = MaskEffect::from_str(right) {
+                let query = left.trim().to_string();
+                if query.is_empty() {
+                    return Err("Mask window target query cannot be empty".to_string());
+                }
+                return Ok(MaskWindow { query, effect });
+            }
+        }
+
+        Ok(MaskWindow {
+            query: trimmed.to_string(),
+            effect: MaskEffect::Transparent,
+        })
+    }
+}
+
 /// Supported output image formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default, Serialize, Deserialize)]
 pub enum ImageFormat {
@@ -109,9 +195,9 @@ pub struct Cli {
     #[arg(
         long = "doctor",
         conflicts_with_all = [
-            "mcp", "list_monitors", "list_windows", "completions", "monitor", "window", "region", "output",
+            "mcp", "list_monitors", "list_windows", "completions", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
-            "scale", "max_dimension", "quality", "open"
+            "scale", "max_dimension", "quality", "open", "mask", "mask_window"
         ]
     )]
     pub doctor: bool,
@@ -120,9 +206,9 @@ pub struct Cli {
     #[arg(
         long = "mcp",
         conflicts_with_all = [
-            "doctor", "list_monitors", "list_windows", "completions", "monitor", "window", "region", "output",
+            "doctor", "list_monitors", "list_windows", "completions", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "format",
-            "coords", "json", "scale", "max_dimension", "quality", "open"
+            "coords", "json", "scale", "max_dimension", "quality", "open", "mask", "mask_window"
         ]
     )]
     pub mcp: bool,
@@ -132,9 +218,9 @@ pub struct Cli {
         short = 'l',
         long = "list-monitors",
         conflicts_with_all = [
-            "doctor", "mcp", "list_windows", "completions", "monitor", "window", "region", "output",
+            "doctor", "mcp", "list_windows", "completions", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
-            "scale", "max_dimension", "quality", "open"
+            "scale", "max_dimension", "quality", "open", "mask", "mask_window"
         ]
     )]
     pub list_monitors: bool,
@@ -143,9 +229,9 @@ pub struct Cli {
     #[arg(
         long = "list-windows",
         conflicts_with_all = [
-            "doctor", "mcp", "list_monitors", "completions", "monitor", "window", "region", "output",
+            "doctor", "mcp", "list_monitors", "completions", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
-            "scale", "max_dimension", "quality", "open"
+            "scale", "max_dimension", "quality", "open", "mask", "mask_window"
         ]
     )]
     pub list_windows: bool,
@@ -156,9 +242,9 @@ pub struct Cli {
         value_name = "SHELL",
         value_enum,
         conflicts_with_all = [
-            "doctor", "mcp", "list_monitors", "list_windows", "monitor", "window", "region", "output",
+            "doctor", "mcp", "list_monitors", "list_windows", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
-            "scale", "max_dimension", "quality", "format", "json", "open"
+            "scale", "max_dimension", "quality", "format", "json", "open", "mask", "mask_window"
         ]
     )]
     pub completions: Option<clap_complete::Shell>,
@@ -168,7 +254,7 @@ pub struct Cli {
         short = 'm',
         long = "monitor",
         value_name = "INDEX",
-        conflicts_with = "window"
+        conflicts_with_all = ["window", "all_monitors"]
     )]
     pub monitor: Option<usize>,
 
@@ -177,9 +263,17 @@ pub struct Cli {
         short = 'w',
         long = "window",
         value_name = "ID|TITLE",
-        conflicts_with = "monitor"
+        conflicts_with_all = ["monitor", "all_monitors"]
     )]
     pub window: Option<String>,
+
+    /// Capture all connected monitors stitched into a unified virtual desktop panorama
+    #[arg(
+        short = 'a',
+        long = "all-monitors",
+        conflicts_with_all = ["monitor", "window"]
+    )]
+    pub all_monitors: bool,
 
     /// Region to capture in coordinates: 'x,y,w,h' (e.g. 100,100,800,600)
     #[arg(short = 'r', long = "region", value_name = "x,y,w,h")]
@@ -188,6 +282,23 @@ pub struct Cli {
     /// Coordinate system for region cropping: 'logical' (scaled by monitor DPI) or 'physical' (exact pixels)
     #[arg(long = "coords", value_enum, default_value_t = CoordMode::Logical)]
     pub coords: CoordMode,
+
+    /// Redact rectangular region(s) on captured image: 'x,y,w,h[:effect]' (effect: transparent, blackout, pixelate, blur; default: transparent)
+    #[arg(
+        long = "mask",
+        value_name = "x,y,w,h[:effect]",
+        action = clap::ArgAction::Append
+    )]
+    pub mask: Vec<MaskRegion>,
+
+    /// Redact active window(s) on captured screen: 'ID|TITLE[:effect]' (effect: transparent, blackout, pixelate, blur; default: transparent)
+    #[arg(
+        long = "mask-window",
+        value_name = "ID|TITLE[:effect]",
+        conflicts_with = "window",
+        action = clap::ArgAction::Append
+    )]
+    pub mask_window: Vec<MaskWindow>,
 
     /// Output file path or directory, or '-' for stdout stream. Defaults to timestamped file in CWD
     #[arg(
@@ -483,5 +594,143 @@ mod tests {
         let cli_open = Cli::try_parse_from(["rgc-cli", "--open"]).unwrap();
         assert!(cli_open.open);
         assert!(Cli::try_parse_from(["rgc-cli", "--open", "--doctor"]).is_err());
+    }
+
+    #[test]
+    fn test_mask_effect_parsing() {
+        assert_eq!(
+            "transparent".parse::<MaskEffect>().unwrap(),
+            MaskEffect::Transparent
+        );
+        assert_eq!(
+            "clear".parse::<MaskEffect>().unwrap(),
+            MaskEffect::Transparent
+        );
+        assert_eq!(
+            "alpha".parse::<MaskEffect>().unwrap(),
+            MaskEffect::Transparent
+        );
+        assert_eq!(
+            "blackout".parse::<MaskEffect>().unwrap(),
+            MaskEffect::Blackout
+        );
+        assert_eq!("black".parse::<MaskEffect>().unwrap(), MaskEffect::Blackout);
+        assert_eq!("solid".parse::<MaskEffect>().unwrap(), MaskEffect::Blackout);
+        assert_eq!(
+            "pixelate".parse::<MaskEffect>().unwrap(),
+            MaskEffect::Pixelate
+        );
+        assert_eq!(
+            "mosaic".parse::<MaskEffect>().unwrap(),
+            MaskEffect::Pixelate
+        );
+        assert_eq!("blur".parse::<MaskEffect>().unwrap(), MaskEffect::Blur);
+        assert_eq!("gaussian".parse::<MaskEffect>().unwrap(), MaskEffect::Blur);
+        assert!("unknown".parse::<MaskEffect>().is_err());
+    }
+
+    #[test]
+    fn test_mask_region_parsing() {
+        let mr1 = "100,200,300,400".parse::<MaskRegion>().unwrap();
+        assert_eq!(mr1.region.x, 100);
+        assert_eq!(mr1.region.y, 200);
+        assert_eq!(mr1.region.width, 300);
+        assert_eq!(mr1.region.height, 400);
+        assert_eq!(mr1.effect, MaskEffect::Transparent);
+
+        let mr2 = "50,60,70,80:blur".parse::<MaskRegion>().unwrap();
+        assert_eq!(mr2.region.x, 50);
+        assert_eq!(mr2.region.y, 60);
+        assert_eq!(mr2.region.width, 70);
+        assert_eq!(mr2.region.height, 80);
+        assert_eq!(mr2.effect, MaskEffect::Blur);
+
+        let mr3 = "0,0,10,20:blackout".parse::<MaskRegion>().unwrap();
+        assert_eq!(mr3.effect, MaskEffect::Blackout);
+
+        let mr4 = "0,0,10,20:pixelate".parse::<MaskRegion>().unwrap();
+        assert_eq!(mr4.effect, MaskEffect::Pixelate);
+
+        assert!("invalid,region".parse::<MaskRegion>().is_err());
+        assert!("0,0,0,0".parse::<MaskRegion>().is_err());
+        assert!("0,0,10,20:invalid_effect".parse::<MaskRegion>().is_err());
+    }
+
+    #[test]
+    fn test_mask_window_parsing() {
+        let mw1 = "1Password".parse::<MaskWindow>().unwrap();
+        assert_eq!(mw1.query, "1Password");
+        assert_eq!(mw1.effect, MaskEffect::Transparent);
+
+        let mw2 = "1Password:blur".parse::<MaskWindow>().unwrap();
+        assert_eq!(mw2.query, "1Password");
+        assert_eq!(mw2.effect, MaskEffect::Blur);
+
+        let mw3 = "Terminal: Cat:blackout".parse::<MaskWindow>().unwrap();
+        assert_eq!(mw3.query, "Terminal: Cat");
+        assert_eq!(mw3.effect, MaskEffect::Blackout);
+
+        let mw4 = "Video: Animals".parse::<MaskWindow>().unwrap();
+        assert_eq!(mw4.query, "Video: Animals");
+        assert_eq!(mw4.effect, MaskEffect::Transparent);
+
+        assert!("".parse::<MaskWindow>().is_err());
+        assert!("   ".parse::<MaskWindow>().is_err());
+    }
+
+    #[test]
+    fn test_cli_parsing_mask_options() {
+        let cli = Cli::try_parse_from([
+            "rgc-cli",
+            "--mask",
+            "100,100,200,200",
+            "--mask",
+            "300,300,50,50:blur",
+            "--mask-window",
+            "1Password:blackout",
+            "--mask-window",
+            "WeChat",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.mask.len(), 2);
+        assert_eq!(cli.mask[0].region.x, 100);
+        assert_eq!(cli.mask[0].effect, MaskEffect::Transparent);
+        assert_eq!(cli.mask[1].effect, MaskEffect::Blur);
+
+        assert_eq!(cli.mask_window.len(), 2);
+        assert_eq!(cli.mask_window[0].query, "1Password");
+        assert_eq!(cli.mask_window[0].effect, MaskEffect::Blackout);
+        assert_eq!(cli.mask_window[1].query, "WeChat");
+        assert_eq!(cli.mask_window[1].effect, MaskEffect::Transparent);
+
+        // Conflict: --mask-window and --window
+        assert!(Cli::try_parse_from(["rgc-cli", "-w", "Code", "--mask-window", "Other"]).is_err());
+
+        // Conflict: --mask and --doctor
+        assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--mask", "0,0,10,10"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parsing_all_monitors_options() {
+        let cli = Cli::try_parse_from(["rgc-cli", "--all-monitors"]).unwrap();
+        assert!(cli.all_monitors);
+        assert_eq!(cli.monitor, None);
+        assert_eq!(cli.window, None);
+
+        let cli_short = Cli::try_parse_from(["rgc-cli", "-a", "-o", "pano.png"]).unwrap();
+        assert!(cli_short.all_monitors);
+
+        // Conflict: --all-monitors and --monitor
+        assert!(Cli::try_parse_from(["rgc-cli", "-a", "-m", "0"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "--all-monitors", "--monitor", "1"]).is_err());
+
+        // Conflict: --all-monitors and --window
+        assert!(Cli::try_parse_from(["rgc-cli", "-a", "-w", "Code"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "--all-monitors", "--window", "123"]).is_err());
+
+        // Conflict: --all-monitors and --doctor / --list-monitors
+        assert!(Cli::try_parse_from(["rgc-cli", "-a", "--doctor"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "-a", "-l"]).is_err());
     }
 }

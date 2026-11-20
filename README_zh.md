@@ -24,8 +24,9 @@
 - **系统自检诊断**: 内置 `--doctor` 标志，快速检测当前操作系统图形显示子系统、DPI 缩放、底层抓屏后端及系统剪贴板就绪状态。
 - **系统剪贴板直写**: 支持 `--clipboard` / `-c` 直接将截图写入系统剪贴板（基于 `arboard` 跨平台支持），无需落盘。
 - **标准输出流式管道**: 支持将编码图像直接流式输出至标准输出 (`-o -`)，优雅处理 `BrokenPipe`，可无缝对接 `wl-copy`、`xclip`、ImageMagick、ffmpeg 或 AI 图像处理流。
-- **High-DPI 缩放感知**: 严密支持用户逻辑坐标系与显示物理像素之间的转换与 `scale_factor` 计算，在 4K 与 Retina 视网膜屏上精准对齐。
-- **多显示器管理**: 列出并支持指定屏幕索引截图（`--list-monitors`, `--monitor <INDEX>`）。
+- **High-DPI 缩放感知**: 严密支持用户逻辑坐标系与显示物理像素之间的转换与 `scale_factor` 计算，在 150% 缩放、4K 与 Retina 视网膜屏上精准对齐。
+- **AI Agent 隐私脱敏与透明打孔**: 支持 `--mask <x,y,w,h[:effect]>` 与 `--mask-window <ID|TITLE[:effect]>`，提供 `transparent`（Alpha 镂空打孔）、`blackout`（黑块遮挡）、`pixelate`（马赛克）、`blur`（双线性下采样高斯模糊）四大脱敏特效。脱敏在下采样前执行，杜绝插值泄密。
+- **多显示器管理与全景拼接**: 列出并支持指定屏幕索引截图（`--list-monitors`, `--monitor <INDEX>`），并独家支持 `-a, --all-monitors` 将双屏、三屏虚拟桌面自动缝合成一张超宽全景大图，跨屏负坐标与异构布局自适应。
 - **矩形区域裁剪**: 支持 `--region x,y,w,h` 裁剪，并在全屏抓取前提供快速越界预校验，节省无谓内存与 GPU 开销。
 - **原子防碰撞命名**: 自动生成的截屏文件名采用毫秒级时间戳搭配原子单调递增序列号，杜绝快速连拍下的文件覆盖。
 - **延时捕获**: 支持毫秒级定时延时捕获（`--delay <MS>`）。
@@ -56,8 +57,11 @@ cargo build --release
       --list-windows          列出所有活动的应用程序窗口并退出
   -m, --monitor <INDEX>       指定要捕获的显示器索引 (从 0 开始，默认为主显示器)
   -w, --window <ID|TITLE>     通过窗口 ID 或标题子串捕获特定窗口 (如 -w 1234 或 -w "Code")
+  -a, --all-monitors          捕获所有已连接显示器并自动拼接为虚拟桌面全景大图 (与 -m、-w 互斥)
   -r, --region <x,y,w,h>      指定截取矩形区域坐标: 'x,y,w,h' (例如 '100,100,800,600')
       --coords <MODE>         区域坐标系: 'logical' (默认，按 DPI 缩放) 或 'physical' (原始物理像素)
+      --mask <x,y,w,h[:effect]> 敏感区域脱敏遮罩: 'x,y,w,h[:effect]' (effect: transparent, blackout, pixelate, blur; 默认: transparent)
+      --mask-window <TARGET>  自动定位窗口并脱敏: 'ID|TITLE[:effect]' (effect: transparent, blackout, pixelate, blur; 默认: transparent)
   -o, --output <PATH>         输出文件路径、目录或 '-' (流式输出至 stdout)。默认为当前目录带时间戳文件
       --output-file <FILE>    显式指定输出文件目标 (若父目录不存在将自动创建)
       --output-dir <DIR>      显式指定输出目录目标 (在指定目录内生成防重时间戳文件)
@@ -230,7 +234,42 @@ rgc-cli -w 197430 --open
 rgc-cli -w "Chrome" -r 0,0,800,600 -o browser_top.png
 ```
 
-#### 14. 运行系统诊断检查
+#### 14. 隐私区域遮罩与透明打孔脱敏 (AI Agent 敏感信息防护)
+```bash
+# 1. 矩形区域透明打孔（默认特效：Alpha 通道置 0，生成透明洞）
+rgc-cli --mask 100,100,200,200 -o safe.png
+
+# 2. 多个区域不同特效组合（模糊、马赛克、纯黑遮挡、镂空打孔）
+rgc-cli --mask 50,50,300,100:blur \
+        --mask 400,200,150,50:blackout \
+        --mask 600,600,200,200:pixelate \
+        -o multi_masked.png
+
+# 3. 自动识别窗口位置并脱敏（如全屏截图中将密码管理器或聊天窗口打孔或模糊）
+rgc-cli --mask-window "1Password:transparent" \
+        --mask-window "WeChat:blur" \
+        -o desktop_desensitized.png
+
+# 4. 配合 150% DPI 屏幕缩放自适应（默认 --coords logical 会自动乘以 1.5 倍）
+rgc-cli --coords logical --mask 100,100,200,200 -o hidpi_safe.png
+
+# 5. 脱敏与图片压缩下采样联动（先脱敏再缩放，杜绝插值泄露）
+rgc-cli --mask 100,100,500,200:blur --scale 0.5 -o low_token_safe.webp
+```
+
+#### 15. 多显示器全景拼接截屏（解决 AI Agent 跨屏迷路）
+```bash
+# 自动抓取所有屏幕并按虚拟桌面相对坐标拼缝为超宽全景图
+rgc-cli -a -o panorama.png
+
+# 全景截屏配合下采样（将双 4K 拼接图等比缩小，节省 AI 视觉 Token）
+rgc-cli -a --max-dimension 2048 -o pano_low_token.webp
+
+# 全景截屏联动敏感窗口脱敏（全景大图中自动将 1Password 打孔）
+rgc-cli -a --mask-window "1Password:transparent" -o pano_safe.png
+```
+
+#### 16. 运行系统诊断检查
 ```bash
 # 人类可读文本摘要
 rgc-cli --doctor
@@ -268,15 +307,17 @@ rgc-cli --doctor --json
 ### 提供的 MCP 工具列表
 
 1. **`list_monitors`**: 枚举所有屏幕、分辨率与 DPI 缩放系数。
-2. **`capture_screen`**: 捕获指定屏幕或局部区域，支持直接返回 Base64 编码图片数据（`image/png`, `image/webp`, `image/jpeg`）或落盘至本地文件。
-   - 参数：`monitor` (整数/字符串), `region` (字符串 `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `scale` (浮点数 `0.01..1.0`), `maxDimension` (最大像素 `>0`), `quality` (压缩质量 `1..100`), `outputPath` (字符串), `returnBase64` (布尔值)。
+2. **`capture_screen`**: 捕获指定屏幕、窗口、全景多屏或局部区域，支持直接返回 Base64 编码图片数据（`image/png`, `image/webp`, `image/jpeg`）或落盘至本地文件。
+   - 参数：`monitor` (整数/字符串), `window` (窗口 ID/标题), `allMonitors` (布尔值，多屏全景拼接), `region` (字符串 `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `scale` (浮点数 `0.01..1.0`), `maxDimension` (最大像素 `>0`), `quality` (压缩质量 `1..100`), `redactions` (数组：`["100,100,200,200:blur"]` 或 `[{"region":"100,100,200,200","effect":"transparent"}]`), `maskWindows` (数组：`["1Password", "WeChat:blur"]`), `outputPath` (字符串), `returnBase64` (布尔值)。
 3. **`doctor`**: 诊断检查当前图形显示子系统与捕获就绪状态。
 
 ### 提供的 MCP 资源 (Resources) 列表
 
 1. **`screen://current`**: 当前主显示器画面的实时快照（`image/png` Base64 二进制资源）。
-2. **`screen://monitor/{index}`**: 动态捕获指定索引显示器的实时画面（如 `screen://monitor/0`）。
-3. **`screen://diagnostics`**: 图形与捕获子系统环境就绪诊断报告（JSON 文本资源）。
+2. **`screen://all`**: 所有活动显示器自动拼接的超宽全景快照（`image/png` Base64 二进制资源）。
+3. **`screen://monitor/{index}`**: 动态捕获指定索引显示器的实时画面（如 `screen://monitor/0`）。
+4. **`screen://window/{id}`**: 动态捕获指定窗口数字 ID 的实时画面（如 `screen://window/1234`）。
+5. **`screen://diagnostics`**: 图形与捕获子系统环境就绪诊断报告（JSON 文本资源）。
 
 ### 客户端接入配置示例
 

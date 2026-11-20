@@ -24,8 +24,9 @@ Fast, lightweight, and cross-platform command-line screen capture utility and Mo
 - **System Diagnostics**: Built-in `--doctor` flag to inspect platform display subsystems, DPI scales, capture backends, and clipboard readiness.
 - **Direct Clipboard Export**: Copy screenshots directly to the system clipboard via `--clipboard` / `-c` without touching the filesystem.
 - **Stdout Streaming**: Stream raw encoded image bytes to stdout (`-o -`) with graceful `BrokenPipe` handling for seamless UNIX piping (`wl-copy`, `xclip`, ImageMagick, ffmpeg).
-- **High-DPI Awareness**: Accurate translation between user logical coordinates and physical screen pixels with display `scale_factor` (e.g. 1.25x, 1.5x, 2.0x).
-- **Multi-Monitor Selection**: Enumerate all connected displays and capture any screen by index (`--list-monitors`, `--monitor <INDEX>`).
+- **High-DPI Awareness**: Accurate translation between user logical coordinates and physical screen pixels with display `scale_factor` (e.g. 1.25x, 1.50x, 2.0x), adapting seamlessly to HiDPI displays.
+- **Privacy Redaction & Transparent Hole Punching**: Tailored for AI Agent vision workflows with `--mask <x,y,w,h[:effect]>` and `--mask-window <ID|TITLE[:effect]>`. Supports 4 redaction effects: `transparent` (alpha=0 hole punching), `blackout` (solid black), `pixelate` (mosaic), and `blur` (downsampled bilinear blur). Executed before downsampling to prevent interpolation leakage.
+- **Multi-Monitor Management & Panorama Stitching**: Enumerate all connected displays and capture any screen by index (`--list-monitors`, `--monitor <INDEX>`), or seamlessly stitch dual/triple/multi-monitor virtual desktops into a single unified panorama with `-a, --all-monitors`, adapting to negative virtual desktop coordinates and heterogeneous display layouts.
 - **Sub-Image Region Cropping**: Flexible rectangle cropping (`--region x,y,w,h`) with fast bounds pre-validation.
 - **Collision-Resistant Naming**: Millisecond-accurate timestamping with atomic monotonic counter prevents filename collisions in rapid capture loops.
 - **Delayed Capture**: Built-in timer delay before taking screenshot (`--delay <MS>`).
@@ -56,8 +57,11 @@ Options:
       --list-windows          List all active application windows and exit
   -m, --monitor <INDEX>       Monitor index to capture (0-indexed). Defaults to primary monitor
   -w, --window <ID|TITLE>     Capture a specific window by ID or title substring (e.g. -w 1234 or -w "Code")
+  -a, --all-monitors          Capture all connected monitors stitched into a virtual desktop panorama (conflicts with -m, -w)
   -r, --region <x,y,w,h>      Region to capture in coordinates: 'x,y,w,h' (e.g. 100,100,800,600)
       --coords <MODE>         Coordinate system for region: 'logical' (default, scaled by DPI) or 'physical' (raw pixels)
+      --mask <x,y,w,h[:effect]> Redact rectangular region(s): 'x,y,w,h[:effect]' (effect: transparent, blackout, pixelate, blur; default: transparent)
+      --mask-window <TARGET>  Auto-detect window bounds & redact: 'ID|TITLE[:effect]' (effect: transparent, blackout, pixelate, blur; default: transparent)
   -o, --output <PATH>         Output file path, directory, or '-' for stdout stream. Defaults to timestamped file in CWD
       --output-file <FILE>    Explicit output file destination (creates parent directories if missing)
       --output-dir <DIR>      Explicit output directory destination (timestamped filename generated inside)
@@ -230,7 +234,42 @@ rgc-cli -w 197430 --open
 rgc-cli -w "Chrome" -r 0,0,800,600 -o browser_top.png
 ```
 
-#### 14. Run system diagnostics
+#### 14. Privacy Redaction & Transparent Hole Punching (AI Agent Protection)
+```bash
+# 1. Punch transparent hole over sensitive area (Alpha=0, default effect)
+rgc-cli --mask 100,100,200,200 -o safe.png
+
+# 2. Combine multiple masks with different effects (blur, blackout, pixelate, transparent)
+rgc-cli --mask 50,50,300,100:blur \
+        --mask 400,200,150,50:blackout \
+        --mask 600,600,200,200:pixelate \
+        -o multi_masked.png
+
+# 3. Auto-locate application windows and redact from screen capture
+rgc-cli --mask-window "1Password:transparent" \
+        --mask-window "WeChat:blur" \
+        -o desktop_desensitized.png
+
+# 4. HiDPI adaptation (e.g. 150% scaling: logical coordinates automatically scale by 1.5x)
+rgc-cli --coords logical --mask 100,100,200,200 -o hidpi_safe.png
+
+# 5. Redaction combined with downscaling (masks applied BEFORE downsampling to prevent leakage)
+rgc-cli --mask 100,100,500,200:blur --scale 0.5 -o low_token_safe.webp
+```
+
+#### 15. Multi-Monitor Panorama Stitching (Multi-Screen Virtual Desktop)
+```bash
+# Automatically stitch all connected monitors into an ultra-wide virtual desktop canvas
+rgc-cli -a -o panorama.png
+
+# Panorama capture combined with downscaling (reduces multi-4K screen tokens for AI vision models)
+rgc-cli -a --max-dimension 2048 -o pano_low_token.webp
+
+# Panorama capture combined with sensitive window redaction (punches hole over 1Password across all monitors)
+rgc-cli -a --mask-window "1Password:transparent" -o pano_safe.png
+```
+
+#### 16. Run system diagnostics
 ```bash
 # Human-readable text report
 rgc-cli --doctor
@@ -268,15 +307,17 @@ Output:
 ### Exposed MCP Tools
 
 1. **`list_monitors`**: Enumerate all connected screens, resolutions, and DPI scale factors.
-2. **`capture_screen`**: Capture screen or cropped region with direct base64 image payload (`image/png`, `image/webp`, `image/jpeg`) or output file.
-   - Arguments: `monitor` (int/str), `region` (string `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `scale` (number `0.01..1.0`), `maxDimension` (int `>0`), `quality` (int `1..100`), `outputPath` (string), `returnBase64` (bool).
+2. **`capture_screen`**: Capture screen, window, stitched multi-monitor panorama, or cropped region with direct base64 image payload (`image/png`, `image/webp`, `image/jpeg`) or output file.
+   - Arguments: `monitor` (int/str), `window` (int/str), `allMonitors` (bool, multi-screen panorama), `region` (string `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `scale` (number `0.01..1.0`), `maxDimension` (int `>0`), `quality` (int `1..100`), `redactions` (array: `["100,100,200,200:blur"]` or `[{"region":"100,100,200,200","effect":"transparent"}]`), `maskWindows` (array: `["1Password", "WeChat:blur"]`), `outputPath` (string), `returnBase64` (bool).
 3. **`doctor`**: Diagnostic check of display subsystem, active backend, and clipboard capabilities.
 
 ### Exposed MCP Resources
 
 1. **`screen://current`**: Live snapshot of the primary display (`image/png` binary blob).
-2. **`screen://monitor/{index}`**: Dynamic snapshot of a specific display monitor by zero-based index (e.g. `screen://monitor/0`).
-3. **`screen://diagnostics`**: Machine-readable JSON diagnostic report of hardware, display server, and capture subsystem.
+2. **`screen://all`**: Live panorama snapshot of all connected displays stitched together (`image/png` binary blob).
+3. **`screen://monitor/{index}`**: Dynamic snapshot of a specific display monitor by zero-based index (e.g. `screen://monitor/0`).
+4. **`screen://window/{id}`**: Dynamic snapshot of a specific application window by numeric ID (e.g. `screen://window/1234`).
+5. **`screen://diagnostics`**: Machine-readable JSON diagnostic report of hardware, display server, and capture subsystem.
 
 ### Client Configuration Examples
 

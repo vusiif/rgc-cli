@@ -283,6 +283,10 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
                                 "type": "string",
                                 "description": "Optional window ID (e.g. '1234') or window title/app name to capture a specific application window instead of a monitor."
                             },
+                            "allMonitors": {
+                                "type": "boolean",
+                                "description": "Optional flag to capture all connected displays stitched into a unified virtual desktop panorama. Conflicts with 'monitor' and 'window'."
+                            },
                             "region": {
                                 "type": "string",
                                 "description": "Cropping region in 'x,y,w,h' format (e.g. '100,100,800,600')."
@@ -316,6 +320,30 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
                             "returnBase64": {
                                 "type": "boolean",
                                 "description": "Whether to return image base64 data in the response. Defaults to true if outputPath is omitted."
+                            },
+                            "redactions": {
+                                "type": "array",
+                                "description": "Optional list of regions to redact for privacy. Each entry can be an object with 'region' (e.g. '100,100,200,200') and optional 'effect' ('transparent', 'blackout', 'pixelate', 'blur'; default: 'transparent'), or a string in 'x,y,w,h[:effect]' format.",
+                                "items": {
+                                    "oneOf": [
+                                        { "type": "string" },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "region": { "type": "string" },
+                                                "effect": { "type": "string", "enum": ["transparent", "blackout", "pixelate", "blur"] }
+                                            },
+                                            "required": ["region"]
+                                        }
+                                    ]
+                                }
+                            },
+                            "maskWindows": {
+                                "type": "array",
+                                "description": "Optional list of window titles or IDs to redact from screen capture. Each entry can be 'ID|TITLE[:effect]' (e.g. '1Password', 'Terminal:blur', '1234:blackout').",
+                                "items": {
+                                    "type": "string"
+                                }
                             }
                         },
                         "additionalProperties": false
@@ -402,6 +430,15 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
                     }
                 }
             }
+
+            resources.push(ResourceDefinition {
+                uri: "screen://all".to_string(),
+                name: "All Monitors Desktop Panorama".to_string(),
+                description: Some(
+                    "Capture a live stitched panorama of all connected displays into a single virtual desktop canvas".to_string(),
+                ),
+                mime_type: Some("image/png".to_string()),
+            });
 
             resources.push(ResourceDefinition {
                 uri: "screen://diagnostics".to_string(),
@@ -508,6 +545,28 @@ fn read_resource(uri: &str) -> Result<ResourceReadResult, JsonRpcError> {
             capture::capture_screen(None, None, CoordMode::Logical).map_err(|e| JsonRpcError {
                 code: -32000,
                 message: format!("Failed to capture current screen for '{uri}': {e}"),
+                data: None,
+            })?;
+        let bytes = output::encode_image_bytes(&image, ImageFormat::Png, None).map_err(|e| {
+            JsonRpcError {
+                code: -32000,
+                message: format!("Failed to encode image to PNG: {e}"),
+                data: None,
+            }
+        })?;
+        let blob = base64_encode(&bytes);
+        Ok(ResourceReadResult {
+            contents: vec![ResourceContent::Blob {
+                uri: uri.to_string(),
+                mime_type: Some("image/png".to_string()),
+                blob,
+            }],
+        })
+    } else if uri == "screen://all" || uri == "screen://panorama" {
+        let image =
+            capture::capture_all_monitors(None, CoordMode::Logical).map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Failed to capture all monitors panorama for '{uri}': {e}"),
                 data: None,
             })?;
         let bytes = output::encode_image_bytes(&image, ImageFormat::Png, None).map_err(|e| {
@@ -800,9 +859,159 @@ fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         };
     }
 
-    let image = if let Some(win_query) = arguments.get("window").and_then(|v| v.as_str()) {
-        match capture::capture_window_with_crop(win_query, region.as_ref()) {
-            Ok(img) => img,
+    let mut manual_masks = Vec::new();
+    if let Some(redacts_val) = arguments.get("redactions") {
+        if let Some(arr) = redacts_val.as_array() {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    match s.parse::<crate::cli::MaskRegion>() {
+                        Ok(mr) => manual_masks.push(mr),
+                        Err(e) => {
+                            return ToolCallResult {
+                                content: vec![ToolContent::Text {
+                                    text: format!("Invalid redaction '{s}': {e}"),
+                                }],
+                                is_error: true,
+                            };
+                        }
+                    }
+                } else if let Some(obj) = item.as_object() {
+                    let reg_str = match obj.get("region").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return ToolCallResult {
+                                content: vec![ToolContent::Text {
+                                    text: "Invalid redaction object: missing 'region' field"
+                                        .to_string(),
+                                }],
+                                is_error: true,
+                            };
+                        }
+                    };
+                    let reg = match reg_str.parse::<Region>() {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return ToolCallResult {
+                                content: vec![ToolContent::Text {
+                                    text: format!("Invalid redaction region '{reg_str}': {e}"),
+                                }],
+                                is_error: true,
+                            };
+                        }
+                    };
+                    let effect = if let Some(eff_str) = obj.get("effect").and_then(|v| v.as_str()) {
+                        match eff_str.parse::<crate::cli::MaskEffect>() {
+                            Ok(eff) => eff,
+                            Err(e) => {
+                                return ToolCallResult {
+                                    content: vec![ToolContent::Text {
+                                        text: format!("Invalid redaction effect '{eff_str}': {e}"),
+                                    }],
+                                    is_error: true,
+                                };
+                            }
+                        }
+                    } else {
+                        crate::cli::MaskEffect::Transparent
+                    };
+                    manual_masks.push(crate::cli::MaskRegion {
+                        region: reg,
+                        effect,
+                    });
+                } else {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!(
+                                "Invalid redaction entry '{item}': expected string or object"
+                            ),
+                        }],
+                        is_error: true,
+                    };
+                }
+            }
+        }
+    }
+
+    let mut window_masks = Vec::new();
+    if let Some(win_masks_val) = arguments.get("maskWindows") {
+        if let Some(arr) = win_masks_val.as_array() {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    match s.parse::<crate::cli::MaskWindow>() {
+                        Ok(mw) => window_masks.push(mw),
+                        Err(e) => {
+                            return ToolCallResult {
+                                content: vec![ToolContent::Text {
+                                    text: format!("Invalid maskWindows entry '{s}': {e}"),
+                                }],
+                                is_error: true,
+                            };
+                        }
+                    }
+                } else if let Some(obj) = item.as_object() {
+                    let win_str = match obj.get("window").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return ToolCallResult {
+                                content: vec![ToolContent::Text {
+                                    text: "Invalid maskWindows object: missing 'window' field"
+                                        .to_string(),
+                                }],
+                                is_error: true,
+                            };
+                        }
+                    };
+                    let effect = if let Some(eff_str) = obj.get("effect").and_then(|v| v.as_str()) {
+                        match eff_str.parse::<crate::cli::MaskEffect>() {
+                            Ok(eff) => eff,
+                            Err(e) => {
+                                return ToolCallResult {
+                                    content: vec![ToolContent::Text {
+                                        text: format!(
+                                            "Invalid maskWindows effect '{eff_str}': {e}"
+                                        ),
+                                    }],
+                                    is_error: true,
+                                };
+                            }
+                        }
+                    } else {
+                        crate::cli::MaskEffect::Transparent
+                    };
+                    window_masks.push(crate::cli::MaskWindow {
+                        query: win_str.to_string(),
+                        effect,
+                    });
+                }
+            }
+        }
+    }
+
+    let all_monitors = arguments
+        .get("allMonitors")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let (image, scale_factor, crop_offset, monitor_origin) = if all_monitors {
+        match capture::capture_all_monitors_with_details(region.as_ref(), coords) {
+            Ok(c) => (
+                c.image,
+                c.scale_factor,
+                c.crop_offset,
+                Some(c.monitor_origin),
+            ),
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("All-monitors capture failed: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        }
+    } else if let Some(win_query) = arguments.get("window").and_then(|v| v.as_str()) {
+        match capture::capture_window_with_details(win_query, region.as_ref()) {
+            Ok(c) => (c.image, c.scale_factor, c.crop_offset, None),
             Err(e) => {
                 return ToolCallResult {
                     content: vec![ToolContent::Text {
@@ -813,8 +1022,13 @@ fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
             }
         }
     } else {
-        match capture::capture_screen(monitor, region.as_ref(), coords) {
-            Ok(img) => img,
+        match capture::capture_screen_with_details(monitor, region.as_ref(), coords) {
+            Ok(c) => (
+                c.image,
+                c.scale_factor,
+                c.crop_offset,
+                Some(c.monitor_origin),
+            ),
             Err(e) => {
                 return ToolCallResult {
                     content: vec![ToolContent::Text {
@@ -824,6 +1038,28 @@ fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
                 };
             }
         }
+    };
+
+    let image = if !manual_masks.is_empty() || !window_masks.is_empty() {
+        let windows = if !window_masks.is_empty() {
+            capture::get_windows().ok()
+        } else {
+            None
+        };
+        let redactions = capture::build_redactions(
+            image.width(),
+            image.height(),
+            scale_factor,
+            crop_offset,
+            monitor_origin,
+            coords,
+            &manual_masks,
+            &window_masks,
+            windows.as_deref(),
+        );
+        output::apply_redactions(image, &redactions)
+    } else {
+        image
     };
 
     let image = output::apply_image_transforms(image, scale, max_dimension);
@@ -1166,6 +1402,51 @@ mod tests {
         let resp = handle_mcp_message(req).expect("response expected");
         assert!(resp.contains(r#""code":-32000"#));
         assert!(resp.contains("Failed to capture window"));
+    }
+
+    #[test]
+    fn test_handle_mcp_tools_list_has_redactions_and_masks() {
+        let req = r#"{"jsonrpc":"2.0","id":31,"method":"tools/list"}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains("redactions"));
+        assert!(resp.contains("maskWindows"));
+        assert!(resp.contains("allMonitors"));
+    }
+
+    #[test]
+    fn test_handle_mcp_resources_list_has_all_monitors() {
+        let req = r#"{"jsonrpc":"2.0","id":35,"method":"resources/list"}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains("screen://all"));
+    }
+
+    #[test]
+    fn test_handle_mcp_resources_read_all_monitors_safe() {
+        let req = r#"{"jsonrpc":"2.0","id":36,"method":"resources/read","params":{"uri":"screen://all"}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        // In headless CI it may return code -32000 (No monitors found), in desktop session it returns blob
+        assert!(resp.contains(r#""id":36"#));
+    }
+
+    #[test]
+    fn test_handle_mcp_tool_call_invalid_redaction() {
+        let req = r#"{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"capture_screen","arguments":{"redactions":["invalid_region_str"]}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""isError":true"#));
+        assert!(resp.contains("Invalid redaction"));
+
+        let req_obj = r#"{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"capture_screen","arguments":{"redactions":[{"effect":"blur"}]}}}"#;
+        let resp_obj = handle_mcp_message(req_obj).expect("response expected");
+        assert!(resp_obj.contains(r#""isError":true"#));
+        assert!(resp_obj.contains("missing 'region' field"));
+    }
+
+    #[test]
+    fn test_handle_mcp_tool_call_invalid_mask_windows() {
+        let req = r#"{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"capture_screen","arguments":{"maskWindows":["   "]}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""isError":true"#));
+        assert!(resp.contains("Invalid maskWindows entry"));
     }
 
     #[test]
