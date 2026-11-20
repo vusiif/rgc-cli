@@ -60,6 +60,55 @@ fn main() -> ExitCode {
     }
 }
 
+struct RawCaptured {
+    image: image::DynamicImage,
+    scale_factor: f32,
+    crop_offset: (u32, u32),
+    monitor_origin: Option<(i32, i32)>,
+}
+
+fn capture_target(args: &Cli) -> Result<RawCaptured, ApiError> {
+    if args.all_monitors {
+        debug!(
+            "Initiating all-monitors panorama capture (region={:?}, coords={:?})",
+            args.region, args.coords
+        );
+        let captured =
+            capture::capture_all_monitors_with_details(args.region.as_ref(), args.coords)?;
+        Ok(RawCaptured {
+            image: captured.image,
+            scale_factor: captured.scale_factor,
+            crop_offset: captured.crop_offset,
+            monitor_origin: Some(captured.monitor_origin),
+        })
+    } else if let Some(ref win_query) = args.window {
+        debug!(
+            "Initiating window capture (query={:?}, region={:?})",
+            win_query, args.region
+        );
+        let captured = capture::capture_window_with_details(win_query, args.region.as_ref())?;
+        Ok(RawCaptured {
+            image: captured.image,
+            scale_factor: captured.scale_factor,
+            crop_offset: captured.crop_offset,
+            monitor_origin: None,
+        })
+    } else {
+        debug!(
+            "Initiating monitor capture (monitor={:?}, region={:?}, coords={:?})",
+            args.monitor, args.region, args.coords
+        );
+        let captured =
+            capture::capture_screen_with_details(args.monitor, args.region.as_ref(), args.coords)?;
+        Ok(RawCaptured {
+            image: captured.image,
+            scale_factor: captured.scale_factor,
+            crop_offset: captured.crop_offset,
+            monitor_origin: Some(captured.monitor_origin),
+        })
+    }
+}
+
 fn run(args: Cli) -> Result<(), ApiError> {
     // 0. Handle shell completions generation
     if let Some(shell) = args.completions {
@@ -236,46 +285,66 @@ fn run(args: Cli) -> Result<(), ApiError> {
         }
     }
 
-    // 4. Perform capture with all-monitors panorama, window selection, or single monitor selection
-    let (dynamic_image, scale_factor, crop_offset, monitor_origin) = if args.all_monitors {
-        debug!(
-            "Initiating all-monitors panorama capture (region={:?}, coords={:?})",
-            args.region, args.coords
-        );
-        let captured =
-            capture::capture_all_monitors_with_details(args.region.as_ref(), args.coords)?;
-        (
-            captured.image,
-            captured.scale_factor,
-            captured.crop_offset,
-            Some(captured.monitor_origin),
-        )
-    } else if let Some(ref win_query) = args.window {
-        debug!(
-            "Initiating window capture (query={:?}, region={:?})",
-            win_query, args.region
-        );
-        let captured = capture::capture_window_with_details(win_query, args.region.as_ref())?;
-        (
-            captured.image,
-            captured.scale_factor,
-            captured.crop_offset,
-            None,
-        )
+    // 4. Perform capture (with optional wait-change detection loop)
+    let raw_captured = if args.wait_change {
+        let mut baseline = capture_target(&args)?;
+        let start_time = std::time::Instant::now();
+        let timeout = Duration::from_millis(args.wait_timeout);
+        let interval = Duration::from_millis(args.wait_interval.max(10));
+        let mut detected_change = false;
+
+        if !args.quiet && !args.json {
+            if is_stdout {
+                eprintln!(
+                    "Waiting for screen visual change (timeout: {} ms)...",
+                    args.wait_timeout
+                );
+            } else {
+                println!(
+                    "Waiting for screen visual change (timeout: {} ms)...",
+                    args.wait_timeout
+                );
+            }
+        }
+
+        while start_time.elapsed() < timeout {
+            sleep(interval);
+            let next_captured = capture_target(&args)?;
+            let diff = output::calculate_image_diff(
+                &next_captured.image,
+                &baseline.image,
+                args.diff_threshold,
+            );
+            if diff.changed && (diff.changed_pixels >= 50 || diff.changed_percent >= 0.05) {
+                debug!(
+                    "Visual change detected after {:?}: {} pixels changed ({:.2}%)",
+                    start_time.elapsed(),
+                    diff.changed_pixels,
+                    diff.changed_percent
+                );
+                baseline = next_captured;
+                detected_change = true;
+                break;
+            }
+            baseline = next_captured;
+        }
+
+        if !detected_change {
+            debug!(
+                "No visual change detected before timeout ({:?}), proceeding with latest frame",
+                timeout
+            );
+        }
+
+        baseline
     } else {
-        debug!(
-            "Initiating monitor capture (monitor={:?}, region={:?}, coords={:?})",
-            args.monitor, args.region, args.coords
-        );
-        let captured =
-            capture::capture_screen_with_details(args.monitor, args.region.as_ref(), args.coords)?;
-        (
-            captured.image,
-            captured.scale_factor,
-            captured.crop_offset,
-            Some(captured.monitor_origin),
-        )
+        capture_target(&args)?
     };
+
+    let dynamic_image = raw_captured.image;
+    let scale_factor = raw_captured.scale_factor;
+    let crop_offset = raw_captured.crop_offset;
+    let monitor_origin = raw_captured.monitor_origin;
 
     // 4.1 Apply privacy redaction masks (transparent hole, blackout, pixelate, blur) before scaling
     let dynamic_image = if !args.mask.is_empty() || !args.mask_window.is_empty() {
@@ -325,6 +394,12 @@ fn run(args: Cli) -> Result<(), ApiError> {
             }
         }
 
+        if args.highlight_diff {
+            if let Some(ref bbox) = diff.bbox {
+                dynamic_image = output::highlight_diff_bbox(dynamic_image, bbox, 2, None);
+            }
+        }
+
         Some(diff)
     } else {
         None
@@ -333,6 +408,21 @@ fn run(args: Cli) -> Result<(), ApiError> {
     // 4.3 Apply visual grounding grid overlay if requested
     if let Some(grid_step) = args.grid {
         dynamic_image = output::apply_grid_overlay(dynamic_image, grid_step);
+    }
+
+    // 4.4 Apply timestamp and/or custom tag watermark badge if requested
+    if args.timestamp || args.tag.is_some() {
+        let ts_str = if args.timestamp {
+            Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+        } else {
+            None
+        };
+        dynamic_image = output::apply_watermark_and_tag(
+            dynamic_image,
+            ts_str.as_deref(),
+            args.tag.as_deref(),
+            output::WatermarkPosition::BottomRight,
+        );
     }
 
     let img_width = dynamic_image.width();

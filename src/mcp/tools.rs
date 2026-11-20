@@ -134,6 +134,30 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "cropChanged": {
                         "type": "boolean",
                         "description": "Optional flag to crop output image to only the bounding box of changed pixels compared to 'diffWith'."
+                    },
+                    "highlightDiff": {
+                        "type": "boolean",
+                        "description": "Optional flag to highlight detected difference bounding box on the image."
+                    },
+                    "timestamp": {
+                        "type": "boolean",
+                        "description": "Optional flag to burn a timestamp watermark badge onto the output image."
+                    },
+                    "tag": {
+                        "type": "string",
+                        "description": "Optional custom text tag to burn onto the output image."
+                    },
+                    "waitChange": {
+                        "type": "boolean",
+                        "description": "Optional flag to wait for screen/window visual change before capturing (ideal for UI automation & click validation)."
+                    },
+                    "waitTimeoutMs": {
+                        "type": "integer",
+                        "description": "Optional timeout in milliseconds to wait for visual change before capturing (default: 5000)."
+                    },
+                    "waitIntervalMs": {
+                        "type": "integer",
+                        "description": "Optional polling interval in milliseconds between change detection checks (default: 100)."
                     }
                 },
                 "additionalProperties": false
@@ -333,6 +357,27 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .get("cropChanged")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let highlight_diff = arguments
+        .get("highlightDiff")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let timestamp = arguments
+        .get("timestamp")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let tag = arguments.get("tag").and_then(|v| v.as_str());
+    let wait_change = arguments
+        .get("waitChange")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let wait_timeout_ms = arguments
+        .get("waitTimeoutMs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5000);
+    let wait_interval_ms = arguments
+        .get("waitIntervalMs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100);
     let diff_with_str = arguments.get("diffWith").and_then(|v| v.as_str());
 
     let mut manual_masks = Vec::new();
@@ -465,60 +510,86 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let (image, scale_factor, crop_offset, monitor_origin) = if all_monitors {
-        match capture::capture_all_monitors_with_details(region.as_ref(), coords) {
-            Ok(c) => (
-                c.image,
-                c.scale_factor,
-                c.crop_offset,
-                Some(c.monitor_origin),
-            ),
-            Err(e) => {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Panorama capture failed: {e}"),
-                    }],
-                    is_error: true,
-                };
-            }
-        }
-    } else if let Some(win_val) = arguments.get("window") {
-        let win_query = match win_val.as_str() {
-            Some(s) => s,
-            None => {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: "Invalid 'window' parameter: expected a string window ID or title"
+    let capture_once = || {
+        if all_monitors {
+            capture::capture_all_monitors_with_details(region.as_ref(), coords)
+                .map(|c| {
+                    (
+                        c.image,
+                        c.scale_factor,
+                        c.crop_offset,
+                        Some(c.monitor_origin),
+                    )
+                })
+                .map_err(|e| format!("Panorama capture failed: {e}"))
+        } else if let Some(win_val) = arguments.get("window") {
+            let win_query = match win_val.as_str() {
+                Some(s) => s,
+                None => {
+                    return Err(
+                        "Invalid 'window' parameter: expected a string window ID or title"
                             .to_string(),
-                    }],
+                    );
+                }
+            };
+            capture::capture_window_with_details(win_query, region.as_ref())
+                .map(|c| (c.image, c.scale_factor, c.crop_offset, None))
+                .map_err(|e| format!("Window capture failed: {e}"))
+        } else {
+            capture::capture_screen_with_details(monitor, region.as_ref(), coords)
+                .map(|c| {
+                    (
+                        c.image,
+                        c.scale_factor,
+                        c.crop_offset,
+                        Some(c.monitor_origin),
+                    )
+                })
+                .map_err(|e| format!("Capture failed: {e}"))
+        }
+    };
+
+    let (image, scale_factor, crop_offset, monitor_origin) = if wait_change {
+        let mut baseline = match capture_once() {
+            Ok(c) => c,
+            Err(err_msg) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text { text: err_msg }],
                     is_error: true,
                 };
             }
         };
-        match capture::capture_window_with_details(win_query, region.as_ref()) {
-            Ok(c) => (c.image, c.scale_factor, c.crop_offset, None),
-            Err(e) => {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Window capture failed: {e}"),
-                    }],
-                    is_error: true,
-                };
+
+        let start_time = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(wait_timeout_ms);
+        let interval = std::time::Duration::from_millis(wait_interval_ms.max(10));
+
+        while start_time.elapsed() < timeout {
+            std::thread::sleep(interval);
+            let next_captured = match capture_once() {
+                Ok(c) => c,
+                Err(err_msg) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text { text: err_msg }],
+                        is_error: true,
+                    };
+                }
+            };
+            let diff = output::calculate_image_diff(&next_captured.0, &baseline.0, diff_threshold);
+            if diff.changed && (diff.changed_pixels >= 50 || diff.changed_percent >= 0.05) {
+                baseline = next_captured;
+                break;
             }
+            baseline = next_captured;
         }
+
+        baseline
     } else {
-        match capture::capture_screen_with_details(monitor, region.as_ref(), coords) {
-            Ok(c) => (
-                c.image,
-                c.scale_factor,
-                c.crop_offset,
-                Some(c.monitor_origin),
-            ),
-            Err(e) => {
+        match capture_once() {
+            Ok(c) => c,
+            Err(err_msg) => {
                 return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Capture failed: {e}"),
-                    }],
+                    content: vec![ToolContent::Text { text: err_msg }],
                     is_error: true,
                 };
             }
@@ -605,11 +676,30 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
                 image = output::crop_to_diff_bbox(image, bbox, 8);
             }
         }
+        if highlight_diff {
+            if let Some(ref bbox) = diff.bbox {
+                image = output::highlight_diff_bbox(image, bbox, 2, None);
+            }
+        }
         diff_summary = serde_json::to_string_pretty(&diff).ok();
     }
 
     if let Some(grid_step) = grid {
         image = output::apply_grid_overlay(image, grid_step);
+    }
+
+    if timestamp || tag.is_some() {
+        let ts_str = if timestamp {
+            Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+        } else {
+            None
+        };
+        image = output::apply_watermark_and_tag(
+            image,
+            ts_str.as_deref(),
+            tag,
+            output::WatermarkPosition::BottomRight,
+        );
     }
 
     let mut content = Vec::new();

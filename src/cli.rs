@@ -198,7 +198,8 @@ pub struct Cli {
             "mcp", "list_monitors", "list_windows", "completions", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window",
-            "grid", "diff_with", "diff_threshold", "crop_changed"
+            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
+            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval"
         ]
     )]
     pub doctor: bool,
@@ -210,7 +211,8 @@ pub struct Cli {
             "doctor", "list_monitors", "list_windows", "completions", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "format",
             "coords", "json", "scale", "max_dimension", "quality", "open", "mask", "mask_window",
-            "grid", "diff_with", "diff_threshold", "crop_changed"
+            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
+            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval"
         ]
     )]
     pub mcp: bool,
@@ -223,7 +225,8 @@ pub struct Cli {
             "doctor", "mcp", "list_windows", "completions", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window",
-            "grid", "diff_with", "diff_threshold", "crop_changed"
+            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
+            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval"
         ]
     )]
     pub list_monitors: bool,
@@ -235,7 +238,8 @@ pub struct Cli {
             "doctor", "mcp", "list_monitors", "completions", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window",
-            "grid", "diff_with", "diff_threshold", "crop_changed"
+            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
+            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval"
         ]
     )]
     pub list_windows: bool,
@@ -249,7 +253,8 @@ pub struct Cli {
             "doctor", "mcp", "list_monitors", "list_windows", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "format", "json", "open", "mask", "mask_window",
-            "grid", "diff_with", "diff_threshold", "crop_changed"
+            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
+            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval"
         ]
     )]
     pub completions: Option<clap_complete::Shell>,
@@ -393,6 +398,30 @@ pub struct Cli {
     /// Crop captured screenshot to only the bounding box of changed pixels compared to --diff-with
     #[arg(long = "crop-changed", requires = "diff_with")]
     pub crop_changed: bool,
+
+    /// Highlight detected differences by drawing a high-contrast boundary box on the screenshot
+    #[arg(long = "highlight-diff", requires = "diff_with")]
+    pub highlight_diff: bool,
+
+    /// Burn a discrete UTC/local timestamp watermark badge onto the output screenshot
+    #[arg(long = "timestamp")]
+    pub timestamp: bool,
+
+    /// Burn a custom text tag (e.g. step name, session ID) onto the output screenshot
+    #[arg(long = "tag", value_name = "TEXT")]
+    pub tag: Option<String>,
+
+    /// Wait for screen/window visual change before capturing (ideal for UI automation & click validation)
+    #[arg(long = "wait-change")]
+    pub wait_change: bool,
+
+    /// Maximum timeout in milliseconds to wait for a visual change before capturing (default: 5000 ms)
+    #[arg(long = "wait-timeout", value_name = "MS", default_value_t = 5000)]
+    pub wait_timeout: u64,
+
+    /// Polling interval in milliseconds between change detection frames (default: 100 ms)
+    #[arg(long = "wait-interval", value_name = "MS", default_value_t = 100)]
+    pub wait_interval: u64,
 
     /// Open captured screenshot file with system default viewer
     #[arg(
@@ -790,5 +819,42 @@ mod tests {
 
         // Grid conflict with doctor
         assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--grid"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parsing_phase9_options() {
+        // Highlight diff requires diff-with
+        assert!(Cli::try_parse_from(["rgc-cli", "--highlight-diff"]).is_err());
+
+        let cli_highlight = Cli::try_parse_from([
+            "rgc-cli",
+            "--diff-with",
+            "base.png",
+            "--highlight-diff",
+            "--timestamp",
+            "--tag",
+            "LOGIN-FLOW",
+        ])
+        .unwrap();
+        assert!(cli_highlight.highlight_diff);
+        assert!(cli_highlight.timestamp);
+        assert_eq!(cli_highlight.tag.as_deref(), Some("LOGIN-FLOW"));
+
+        // Wait change options
+        let cli_wait = Cli::try_parse_from([
+            "rgc-cli",
+            "--wait-change",
+            "--wait-timeout",
+            "3000",
+            "--wait-interval",
+            "150",
+        ])
+        .unwrap();
+        assert!(cli_wait.wait_change);
+        assert_eq!(cli_wait.wait_timeout, 3000);
+        assert_eq!(cli_wait.wait_interval, 150);
+
+        // Wait change conflict with doctor
+        assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--wait-change"]).is_err());
     }
 }

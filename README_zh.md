@@ -77,6 +77,12 @@ cargo build --release
       --diff-with <PATH>      与指定的历史参考截图比对并计算变动外接矩形
       --diff-threshold <0-255> 像素比对差异容差阈值 (默认 16)
       --crop-changed          自动裁剪至发生变动的最小外接矩形 (需配合 --diff-with)
+      --highlight-diff        在图像上绘制高对比度红框突出显示变动区域 (需配合 --diff-with)
+      --timestamp             在输出截图右下角叠加印制时间戳水印徽标
+      --tag <TEXT>            在输出截图右下角叠加印制自定义文本标签 (如步骤名称、会话ID)
+      --wait-change           等待屏幕/窗口发生视觉变动后立即捕获 (适合 UI 自动化与点击响应确认)
+      --wait-timeout <MS>     等待视觉变动的最大超时毫秒数 (默认 5000 毫秒)
+      --wait-interval <MS>    变动检测轮询间隔毫秒数 (默认 100 毫秒)
       --open                  截图保存后自动调用系统默认查看器打开
       --completions <SHELL>   生成终端 Tab 自动补全脚本到 stdout [可选: bash, elvish, fish, powershell, zsh]
       --json                  以结构化 JSON 格式输出结果 (非常适合自动化与 AI 智能体)
@@ -299,7 +305,28 @@ rgc-cli --diff-with prev.png --crop-changed -o delta.png --json
 rgc-cli --diff-with prev.png --diff-threshold 32 --json
 ```
 
-#### 18. 运行系统诊断检查
+#### 18. 变动区域高亮红框突出与时间戳水印
+```bash
+# 在原图上绘制高对比度变动红框 (DIFF:WxH 标签)，一目了然确认操作变化
+rgc-cli --diff-with prev.png --highlight-diff -o diff_highlighted.png
+
+# 叠加 UTC/本地时间戳与任务步骤标签 (纯 safe Rust 3x5 点阵字体渲染，零外部字体依赖)
+rgc-cli --timestamp --tag "STEP-LOGIN" -o tracked.png
+
+# 综合联动：全景截屏 + 网格标尺 + 变动高亮 + 时间戳溯源
+rgc-cli -a --grid 100 --diff-with baseline.png --highlight-diff --timestamp --tag "TASK_042" -o trace.png
+```
+
+#### 19. 响应式等待变动捕获 (告别脆弱的固定 sleep)
+```bash
+# 启动后监测屏幕，一旦 UI 响应渲染完毕（检测到像素色差变动）立即触发截屏（超时 5 秒）
+rgc-cli --wait-change --wait-timeout 5000 -o after_click.png
+
+# 等待窗口内容变动后立即仅裁剪发生变动的局部小图
+rgc-cli -w "Calculator" --wait-change --crop-changed --diff-with prev.png -o calc_result.png
+```
+
+#### 20. 运行系统诊断检查
 ```bash
 # 人类可读文本摘要
 rgc-cli --doctor
@@ -408,10 +435,25 @@ rgc-cli --doctor --json
 
 - [`src/main.rs`](src/main.rs): 统一命令行入口、集中式错误分发与顶层流程管线。
 - [`src/cli.rs`](src/cli.rs): 基于 `clap` derive 的类型安全参数解析，包含自定义 `Region` 解析与互斥冲突矩阵。
-- [`src/capture.rs`](src/capture.rs): 跨平台底层抓屏抽象、DPI 逻辑/物理坐标映射、屏幕枚举与裁剪预校验。
+- [`src/api.rs`](src/api.rs): 公共 API 错误码、统一响应数据信封与结构化模型定义。
+- [`src/capture/`](src/capture/): 跨平台底层抓屏与坐标换算模块包：
+  - `types.rs`: 抓屏错误与实体数据结构。
+  - `crop.rs`: 溢出安全与 DPI 缩放矩阵适配的裁剪换算。
+  - `redaction.rs`: 敏感区域脱敏与相交遮罩坐标解算。
+  - `screen.rs`: 显示器探测枚举与单屏截取。
+  - `window.rs`: 窗口枚举、标题模糊匹配与窗口精准捕获。
+  - `panorama.rs`: 多显示器全景画布拼接与负坐标排版。
+  - `mod.rs`: 模块统一向外兼容导出。
+- [`src/transform.rs`](src/transform.rs): 纯图像处理流水线（脱敏特效、3x5 点阵像素渲染、网格标尺、逐像素色差比对、变动框高亮与水印徽标）。
+- [`src/output.rs`](src/output.rs): 跨平台剪贴板直写、stdout 流式管道、原子毫秒级防重命名与格式编码持久化。
 - [`src/doctor.rs`](src/doctor.rs): 运行环境与硬件诊断、图形子系统就绪检测与报告构建。
-- [`src/mcp.rs`](src/mcp.rs): MCP stdio 服务端协议实现、RFC 4648 高性能 Base64 编码与工具调用分发。
-- [`src/output.rs`](src/output.rs): 跨平台剪贴板直写、stdout 流式管道、原子毫秒级防重命名、格式校验与 JSON Envelope 规范。
+- [`src/mcp/`](src/mcp/): 模块化 Model Context Protocol 服务端：
+  - `types.rs`: JSON-RPC 2.0 基础协议与 MCP 实体模型。
+  - `base64.rs`: 纯 Safe Rust 高性能 Base64 编解码器与 RFC 向量测试。
+  - `resources.rs`: MCP 资源 URI 读取与 Base64 封装。
+  - `tools.rs`: 工具 JSON Schema 声明与调度执行。
+  - `prompts.rs`: MCP Prompts 协议与开箱即用 Agent 工作流模板。
+  - `mod.rs`: Stdio 消息路由分发主循环与集成测试。
 
 ---
 

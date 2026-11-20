@@ -1,9 +1,11 @@
 pub mod base64;
+pub mod prompts;
 pub mod resources;
 pub mod tools;
 pub mod types;
 
 pub use base64::*;
+pub use prompts::*;
 pub use resources::*;
 pub use tools::*;
 pub use types::*;
@@ -59,6 +61,9 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
                         tools: serde_json::json!({}),
                         resources: Some(serde_json::json!({
                             "subscribe": false,
+                            "listChanged": false,
+                        })),
+                        prompts: Some(serde_json::json!({
                             "listChanged": false,
                         })),
                     },
@@ -244,6 +249,32 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
                 }
             }
         }
+        "prompts/list" => {
+            let res = JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: handle_prompts_list(),
+            };
+            serde_json::to_string(&res).ok()
+        }
+        "prompts/get" => match handle_prompts_get(&req.params) {
+            Ok(result) => {
+                let res = JsonRpcResponse {
+                    jsonrpc: "2.0",
+                    id,
+                    result,
+                };
+                serde_json::to_string(&res).ok()
+            }
+            Err(err) => {
+                let err_res = JsonRpcErrorResponse {
+                    jsonrpc: "2.0",
+                    id,
+                    error: err,
+                };
+                serde_json::to_string(&err_res).ok()
+            }
+        },
         _ => {
             let err = JsonRpcErrorResponse {
                 jsonrpc: "2.0",
@@ -524,6 +555,30 @@ mod tests {
         let resp = handle_mcp_message(req).expect("response expected");
         assert!(resp.contains(r#""isError":true"#));
         assert!(resp.contains("Failed to open diff reference image"));
+    }
+
+    #[test]
+    fn test_handle_mcp_prompts_list() {
+        let req = r#"{"jsonrpc":"2.0","id":40,"method":"prompts/list"}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains("inspect_screen"));
+        assert!(resp.contains("verify_ui_action"));
+        assert!(resp.contains("diagnose_system"));
+    }
+
+    #[test]
+    fn test_handle_mcp_prompts_get() {
+        let req = r#"{"jsonrpc":"2.0","id":41,"method":"prompts/get","params":{"name":"inspect_screen","arguments":{"focus":"Calculator"}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains("Calculator"));
+
+        let req_missing = r#"{"jsonrpc":"2.0","id":42,"method":"prompts/get","params":{}}"#;
+        let resp_missing = handle_mcp_message(req_missing).expect("response expected");
+        assert!(resp_missing.contains(r#""code":-32602"#));
+
+        let req_unknown = r#"{"jsonrpc":"2.0","id":43,"method":"prompts/get","params":{"name":"unknown_prompt"}}"#;
+        let resp_unknown = handle_mcp_message(req_unknown).expect("response expected");
+        assert!(resp_unknown.contains("not found"));
     }
 
     #[test]

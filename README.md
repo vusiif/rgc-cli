@@ -77,6 +77,12 @@ Options:
       --diff-with <IMAGE>     Compare with reference screenshot and compute difference bounding box
       --diff-threshold <0-255> Pixel difference tolerance threshold (default: 16)
       --crop-changed          Crop output to only the bounding box of changed pixels (requires --diff-with)
+      --highlight-diff        Draw a prominent high-contrast boundary box on the image around differences (requires --diff-with)
+      --timestamp             Burn a UTC/local timestamp watermark badge onto the output screenshot
+      --tag <TEXT>            Burn a custom text tag (e.g. step name, session ID) onto the output screenshot
+      --wait-change           Wait for screen/window visual change before capturing (ideal for UI automation)
+      --wait-timeout <MS>     Maximum timeout in ms to wait for a visual change before capturing (default: 5000)
+      --wait-interval <MS>    Polling interval in ms between change detection checks (default: 100)
       --open                  Open captured screenshot file with system default viewer
       --completions <SHELL>   Generate shell completion script to stdout [possible values: bash, elvish, fish, powershell, zsh]
       --json                  Output result as structured JSON (ideal for automation & AI agents)
@@ -299,7 +305,28 @@ rgc-cli --diff-with prev.png --crop-changed -o delta.png --json
 rgc-cli --diff-with prev.png --diff-threshold 32 --json
 ```
 
-#### 18. Run system diagnostics
+#### 18. Highlight Changed Regions & Burn Timestamp Watermark
+```bash
+# Draw high-contrast red bounding box with DIFF:WxH label over changed areas
+rgc-cli --diff-with prev.png --highlight-diff -o diff_highlighted.png
+
+# Burn UTC/local timestamp and custom task/step badge onto screenshot
+rgc-cli --timestamp --tag "STEP-LOGIN" -o tracked.png
+
+# Combined workflow: panorama + grid + diff highlight + timestamp audit
+rgc-cli -a --grid 100 --diff-with baseline.png --highlight-diff --timestamp --tag "TASK_042" -o trace.png
+```
+
+#### 19. Responsive Wait for Screen Changes (Zero-Latency UI Automation)
+```bash
+# Poll screen and capture immediately upon detecting UI visual update (5s timeout)
+rgc-cli --wait-change --wait-timeout 5000 -o after_click.png
+
+# Wait for window state transition and crop only the changed sub-region
+rgc-cli -w "Calculator" --wait-change --crop-changed --diff-with prev.png -o calc_result.png
+```
+
+#### 20. Run system diagnostics
 ```bash
 # Human-readable text report
 rgc-cli --doctor
@@ -410,10 +437,25 @@ In `--json` mode or standard CLI usage, exit codes adhere strictly to the follow
 
 - [`src/main.rs`](src/main.rs): Clean CLI entry point, centralized error handling, and top-level pipeline orchestration.
 - [`src/cli.rs`](src/cli.rs): Type-safe command-line parsing powered by `clap` derive, including custom `Region` parser with boundary checks and serde derivations.
-- [`src/capture.rs`](src/capture.rs): Core capture abstraction, DPI logical-to-physical coordinate mapping, multi-monitor querying, and bounds checking.
+- [`src/api.rs`](src/api.rs): Common API error codes, unified response envelope, and structured JSON contracts.
+- [`src/capture/`](src/capture/): Modular cross-platform screen and window capture package:
+  - `types.rs`: Capture errors, display info, and captured image containers.
+  - `crop.rs`: Overflow-safe and DPI-aware coordinate mapping and validation.
+  - `redaction.rs`: Privacy mask region resolution and window intersection geometry.
+  - `screen.rs`: Physical display enumeration and monitor screenshot capture.
+  - `window.rs`: Window enumeration, fuzzy title matching, and window capture.
+  - `panorama.rs`: Multi-monitor virtual desktop canvas stitching and negative coordinate normalization.
+  - `mod.rs`: Backward-compatible public exports.
+- [`src/transform.rs`](src/transform.rs): Pure image processing pipeline (redactions, 3x5 ASCII bitmap text rendering, grid overlay, pixel diff calculation, diff bounding box highlighting, and watermark badge).
+- [`src/output.rs`](src/output.rs): Clipboard export via `arboard`, stdout streaming with BrokenPipe safety, collision-resistant timestamping, format validation, and persistence.
 - [`src/doctor.rs`](src/doctor.rs): Environment and hardware diagnostics, subsystem capability checks, and structured reporting.
-- [`src/mcp.rs`](src/mcp.rs): Model Context Protocol (MCP) stdio server implementation, RFC 4648 base64 encoding, and tool execution.
-- [`src/output.rs`](src/output.rs): Clipboard export via `arboard`, stdout streaming with BrokenPipe safety, collision-resistant timestamping, format validation, and unified JSON envelope schema.
+- [`src/mcp/`](src/mcp/): Modular Model Context Protocol stdio server:
+  - `types.rs`: JSON-RPC 2.0 protocol structs and MCP entities.
+  - `base64.rs`: Pure Safe Rust RFC 4648 base64 codec with test vectors.
+  - `resources.rs`: MCP Resource URI handling and image encapsulation.
+  - `tools.rs`: Tool JSON Schemas and dispatch execution.
+  - `prompts.rs`: Standard MCP Prompts protocol and built-in agent workflow templates.
+  - `mod.rs`: Stdio loop, request routing, and integration tests.
 
 ---
 

@@ -207,6 +207,58 @@ const FONT_3X5_DIGITS: [[u8; 5]; 10] = [
 const FONT_3X5_COMMA: [u8; 5] = [0b000, 0b000, 0b000, 0b010, 0b100];
 const FONT_3X5_MINUS: [u8; 5] = [0b000, 0b000, 0b111, 0b000, 0b000];
 
+const FONT_3X5_LETTERS: [[u8; 5]; 26] = [
+    [0b010, 0b101, 0b111, 0b101, 0b101], // A
+    [0b110, 0b101, 0b110, 0b101, 0b110], // B
+    [0b011, 0b100, 0b100, 0b100, 0b011], // C
+    [0b110, 0b101, 0b101, 0b101, 0b110], // D
+    [0b111, 0b100, 0b110, 0b100, 0b111], // E
+    [0b111, 0b100, 0b110, 0b100, 0b100], // F
+    [0b011, 0b100, 0b101, 0b101, 0b011], // G
+    [0b101, 0b101, 0b111, 0b101, 0b101], // H
+    [0b111, 0b010, 0b010, 0b010, 0b111], // I
+    [0b001, 0b001, 0b001, 0b101, 0b010], // J
+    [0b101, 0b110, 0b100, 0b110, 0b101], // K
+    [0b100, 0b100, 0b100, 0b100, 0b111], // L
+    [0b101, 0b111, 0b101, 0b101, 0b101], // M
+    [0b110, 0b101, 0b101, 0b101, 0b101], // N
+    [0b010, 0b101, 0b101, 0b101, 0b010], // O
+    [0b110, 0b101, 0b110, 0b100, 0b100], // P
+    [0b010, 0b101, 0b101, 0b110, 0b011], // Q
+    [0b110, 0b101, 0b110, 0b101, 0b101], // R
+    [0b011, 0b100, 0b010, 0b001, 0b110], // S
+    [0b111, 0b010, 0b010, 0b010, 0b010], // T
+    [0b101, 0b101, 0b101, 0b101, 0b010], // U
+    [0b101, 0b101, 0b101, 0b010, 0b010], // V
+    [0b101, 0b101, 0b101, 0b111, 0b101], // W
+    [0b101, 0b101, 0b010, 0b101, 0b101], // X
+    [0b101, 0b101, 0b010, 0b010, 0b010], // Y
+    [0b111, 0b001, 0b010, 0b100, 0b111], // Z
+];
+const FONT_3X5_SPACE: [u8; 5] = [0b000, 0b000, 0b000, 0b000, 0b000];
+const FONT_3X5_COLON: [u8; 5] = [0b000, 0b010, 0b000, 0b010, 0b000];
+const FONT_3X5_DOT: [u8; 5] = [0b000, 0b000, 0b000, 0b000, 0b010];
+const FONT_3X5_SLASH: [u8; 5] = [0b001, 0b001, 0b010, 0b100, 0b100];
+const FONT_3X5_UNDERSCORE: [u8; 5] = [0b000, 0b000, 0b000, 0b000, 0b111];
+const FONT_3X5_PIPE: [u8; 5] = [0b010, 0b010, 0b010, 0b010, 0b010];
+
+fn get_glyph_3x5(ch: char) -> Option<&'static [u8; 5]> {
+    match ch {
+        '0'..='9' => Some(&FONT_3X5_DIGITS[(ch as usize) - ('0' as usize)]),
+        'A'..='Z' => Some(&FONT_3X5_LETTERS[(ch as usize) - ('A' as usize)]),
+        'a'..='z' => Some(&FONT_3X5_LETTERS[(ch.to_ascii_uppercase() as usize) - ('A' as usize)]),
+        ',' => Some(&FONT_3X5_COMMA),
+        '-' => Some(&FONT_3X5_MINUS),
+        ':' => Some(&FONT_3X5_COLON),
+        '.' => Some(&FONT_3X5_DOT),
+        '/' => Some(&FONT_3X5_SLASH),
+        '_' => Some(&FONT_3X5_UNDERSCORE),
+        '|' => Some(&FONT_3X5_PIPE),
+        ' ' => Some(&FONT_3X5_SPACE),
+        _ => None,
+    }
+}
+
 /// Alpha-blends a source pixel over the destination image at (x, y).
 #[inline]
 fn blend_pixel(img: &mut image::RgbaImage, x: u32, y: u32, src: image::Rgba<u8>) {
@@ -273,14 +325,7 @@ fn draw_label_3x5(
     let cur_y = start_y + 1;
 
     for ch in text.chars() {
-        let glyph = match ch {
-            '0'..='9' => Some(&FONT_3X5_DIGITS[(ch as usize) - ('0' as usize)]),
-            ',' => Some(&FONT_3X5_COMMA),
-            '-' => Some(&FONT_3X5_MINUS),
-            _ => None,
-        };
-
-        if let Some(g) = glyph {
+        if let Some(g) = get_glyph_3x5(ch) {
             for (row, &bits) in g.iter().enumerate() {
                 let py = cur_y + row as u32;
                 if py >= img_h {
@@ -466,6 +511,130 @@ pub fn crop_to_diff_bbox(image: DynamicImage, bbox: &DiffBBox, padding: u32) -> 
     image.crop_imm(px, py, pw, ph)
 }
 
+/// Draw a prominent bounding box around visual differences on the image.
+pub fn highlight_diff_bbox(
+    image: DynamicImage,
+    bbox: &DiffBBox,
+    stroke_width: u32,
+    box_color: Option<image::Rgba<u8>>,
+) -> DynamicImage {
+    let mut rgba = image.into_rgba8();
+    let img_w = rgba.width();
+    let img_h = rgba.height();
+
+    let stroke = stroke_width.clamp(1, 10);
+    let color = box_color.unwrap_or(image::Rgba([255, 30, 30, 255])); // High-visibility red
+    let label_bg = image::Rgba([0, 0, 0, 210]);
+    let label_fg = image::Rgba([255, 255, 255, 255]);
+
+    let x0 = bbox.x.min(img_w);
+    let y0 = bbox.y.min(img_h);
+    let x1 = (bbox.x.saturating_add(bbox.width)).min(img_w);
+    let y1 = (bbox.y.saturating_add(bbox.height)).min(img_h);
+
+    if x0 >= x1 || y0 >= y1 {
+        return DynamicImage::ImageRgba8(rgba);
+    }
+
+    // Top border
+    for py in y0..(y0 + stroke).min(y1) {
+        for px in x0..x1 {
+            rgba.put_pixel(px, py, color);
+        }
+    }
+    // Bottom border
+    let b_top = y1.saturating_sub(stroke).max(y0);
+    for py in b_top..y1 {
+        for px in x0..x1 {
+            rgba.put_pixel(px, py, color);
+        }
+    }
+    // Left border
+    for px in x0..(x0 + stroke).min(x1) {
+        for py in y0..y1 {
+            rgba.put_pixel(px, py, color);
+        }
+    }
+    // Right border
+    let r_left = x1.saturating_sub(stroke).max(x0);
+    for px in r_left..x1 {
+        for py in y0..y1 {
+            rgba.put_pixel(px, py, color);
+        }
+    }
+
+    // Small label tag
+    let label = format!("DIFF:{}x{}", bbox.width, bbox.height);
+    let label_y = if y0 >= 10 { y0 - 9 } else { y0 + stroke + 1 };
+    draw_label_3x5(&mut rgba, x0, label_y, &label, label_fg, label_bg);
+
+    DynamicImage::ImageRgba8(rgba)
+}
+
+/// Watermark position options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WatermarkPosition {
+    #[default]
+    BottomRight,
+    BottomLeft,
+    TopRight,
+    TopLeft,
+}
+
+/// Overlay timestamp and/or custom tag badge onto image.
+pub fn apply_watermark_and_tag(
+    image: DynamicImage,
+    timestamp: Option<&str>,
+    tag: Option<&str>,
+    position: WatermarkPosition,
+) -> DynamicImage {
+    let mut parts = Vec::new();
+    if let Some(t) = timestamp {
+        if !t.is_empty() {
+            parts.push(t);
+        }
+    }
+    if let Some(tg) = tag {
+        if !tg.is_empty() {
+            parts.push(tg);
+        }
+    }
+    if parts.is_empty() {
+        return image;
+    }
+
+    let text = parts.join(" | ");
+    let mut rgba = image.into_rgba8();
+    let img_w = rgba.width();
+    let img_h = rgba.height();
+
+    // 4 pixels per character + padding
+    let badge_w = (text.len() as u32) * 4 + 6;
+    let badge_h = 11; // 7px text + 4px padding
+
+    if img_w < badge_w || img_h < badge_h {
+        return DynamicImage::ImageRgba8(rgba);
+    }
+
+    let margin = 8u32;
+    let (start_x, start_y) = match position {
+        WatermarkPosition::BottomRight => (
+            img_w.saturating_sub(badge_w + margin),
+            img_h.saturating_sub(badge_h + margin),
+        ),
+        WatermarkPosition::BottomLeft => (margin, img_h.saturating_sub(badge_h + margin)),
+        WatermarkPosition::TopRight => (img_w.saturating_sub(badge_w + margin), margin),
+        WatermarkPosition::TopLeft => (margin, margin),
+    };
+
+    let fg = image::Rgba([255, 255, 255, 255]);
+    let bg = image::Rgba([0, 0, 0, 200]);
+
+    draw_label_3x5(&mut rgba, start_x, start_y, &text, fg, bg);
+
+    DynamicImage::ImageRgba8(rgba)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,5 +794,61 @@ mod tests {
         let cropped = crop_to_diff_bbox(img2, diff.bbox.as_ref().unwrap(), 5);
         assert_eq!(cropped.width(), 30); // 20 + 5*2
         assert_eq!(cropped.height(), 20); // 10 + 5*2
+    }
+
+    #[test]
+    fn test_highlight_diff_bbox() {
+        let base =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(100, 100, image::Rgba([0, 0, 0, 255])));
+        let bbox = DiffBBox {
+            x: 20,
+            y: 20,
+            width: 30,
+            height: 30,
+        };
+        let highlighted = highlight_diff_bbox(base, &bbox, 2, None);
+        let rgba = highlighted.into_rgba8();
+
+        // Top border at (20, 20) should be colored bright red
+        assert_eq!(rgba.get_pixel(20, 20), &image::Rgba([255, 30, 30, 255]));
+        // Bottom border at (20, 49) should be bright red
+        assert_eq!(rgba.get_pixel(20, 49), &image::Rgba([255, 30, 30, 255]));
+    }
+
+    #[test]
+    fn test_apply_watermark_and_tag() {
+        let base = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            200,
+            100,
+            image::Rgba([50, 50, 50, 255]),
+        ));
+        let with_wm = apply_watermark_and_tag(
+            base,
+            Some("2026-11-20"),
+            Some("STEP-1"),
+            WatermarkPosition::BottomRight,
+        );
+        let rgba = with_wm.into_rgba8();
+
+        // Check that watermark area at (120, 83) was modified
+        let sample = rgba.get_pixel(120, 83);
+        assert_ne!(sample, &image::Rgba([50, 50, 50, 255]));
+    }
+
+    #[test]
+    fn test_get_glyph_3x5_ascii() {
+        // Letters
+        assert!(get_glyph_3x5('A').is_some());
+        assert!(get_glyph_3x5('z').is_some());
+        // Digits
+        assert!(get_glyph_3x5('5').is_some());
+        // Symbols
+        assert!(get_glyph_3x5(':').is_some());
+        assert!(get_glyph_3x5('/').is_some());
+        assert!(get_glyph_3x5('|').is_some());
+        assert!(get_glyph_3x5('_').is_some());
+        assert!(get_glyph_3x5(' ').is_some());
+        // Unknown symbol returns None
+        assert!(get_glyph_3x5('~').is_none());
     }
 }

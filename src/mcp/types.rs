@@ -45,6 +45,8 @@ pub struct ServerCapabilities {
     pub tools: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resources: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompts: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,4 +143,48 @@ pub enum ToolContent {
         #[serde(rename = "mimeType")]
         mime_type: String,
     },
+}
+
+#[derive(Debug, Serialize)]
+pub struct PromptListResult {
+    pub prompts: Vec<PromptDefinition>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptDefinition {
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<PromptArgument>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptArgument {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetPromptResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub messages: Vec<PromptMessage>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptMessage {
+    pub role: String,
+    pub content: PromptMessageContent,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum PromptMessageContent {
+    #[serde(rename = "text")]
+    Text { text: String },
 }
