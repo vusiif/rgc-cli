@@ -26,6 +26,8 @@ Fast, lightweight, and cross-platform command-line screen capture utility and Mo
 - **Stdout Streaming**: Stream raw encoded image bytes to stdout (`-o -`) with graceful `BrokenPipe` handling for seamless UNIX piping (`wl-copy`, `xclip`, ImageMagick, ffmpeg).
 - **High-DPI Awareness**: Accurate translation between user logical coordinates and physical screen pixels with display `scale_factor` (e.g. 1.25x, 1.50x, 2.0x), adapting seamlessly to HiDPI displays.
 - **Privacy Redaction & Transparent Hole Punching**: Tailored for AI Agent vision workflows with `--mask <x,y,w,h[:effect]>` and `--mask-window <ID|TITLE[:effect]>`. Supports 4 redaction effects: `transparent` (alpha=0 hole punching), `blackout` (solid black), `pixelate` (mosaic), and `blur` (downsampled bilinear blur). Executed before downsampling to prevent interpolation leakage.
+- **Visual Grounding Grid & Anchors**: Overlay subtle visual grid lines and coordinate anchors (`--grid [STEP]`) with a built-in 3x5 bitmap font in pure safe Rust, dramatically boosting AI Agent click grounding and GUI navigation accuracy.
+- **Screen Diff & Incremental Token Cropping**: Dynamic visual difference calculation (`--diff-with <IMAGE>`, `--diff-threshold <0-255>`, `--crop-changed`) to compare against reference screenshots, reporting changed pixel counts, bounding box (`changed_bbox`), and automatically cropping to only changed areas to save 80%+ multimodal tokens.
 - **Multi-Monitor Management & Panorama Stitching**: Enumerate all connected displays and capture any screen by index (`--list-monitors`, `--monitor <INDEX>`), or seamlessly stitch dual/triple/multi-monitor virtual desktops into a single unified panorama with `-a, --all-monitors`, adapting to negative virtual desktop coordinates and heterogeneous display layouts.
 - **Sub-Image Region Cropping**: Flexible rectangle cropping (`--region x,y,w,h`) with fast bounds pre-validation.
 - **Collision-Resistant Naming**: Millisecond-accurate timestamping with atomic monotonic counter prevents filename collisions in rapid capture loops.
@@ -71,6 +73,10 @@ Options:
       --scale <FACTOR>        Downscale image by a factor between 0.01 and 1.0 (e.g. 0.5 for half resolution)
       --max-dimension <PX>    Constrain maximum width or height to PX pixels, preserving aspect ratio
       --quality <1-100>       Compression quality for JPEG output (1-100, defaults to 85)
+      --grid [STEP]           Overlay visual grounding grid lines and coordinate anchors (default step: 100px)
+      --diff-with <IMAGE>     Compare with reference screenshot and compute difference bounding box
+      --diff-threshold <0-255> Pixel difference tolerance threshold (default: 16)
+      --crop-changed          Crop output to only the bounding box of changed pixels (requires --diff-with)
       --open                  Open captured screenshot file with system default viewer
       --completions <SHELL>   Generate shell completion script to stdout [possible values: bash, elvish, fish, powershell, zsh]
       --json                  Output result as structured JSON (ideal for automation & AI agents)
@@ -269,7 +275,31 @@ rgc-cli -a --max-dimension 2048 -o pano_low_token.webp
 rgc-cli -a --mask-window "1Password:transparent" -o pano_safe.png
 ```
 
-#### 16. Run system diagnostics
+#### 16. Visual Grounding Grid & Coordinate Anchors (AI Agent Localization)
+```bash
+# Overlay subtle cyan grid with crosshairs and coordinate labels every 100 pixels
+rgc-cli --grid -o grid_100.png
+
+# Custom 50px high-density grid for fine-grained coordinate estimation
+rgc-cli --grid 50 -o grid_50.png
+
+# Panorama capture combined with grid overlay and downscaling for AI vision models
+rgc-cli -a --grid 100 --max-dimension 2048 -o pano_grid.webp
+```
+
+#### 17. Screen Diff & Incremental Token-Saving Crop (Agent Action Verification)
+```bash
+# Compare against previous screenshot and return structured diff metadata
+rgc-cli --diff-with prev.png --json
+
+# Crop output to only the bounding box of changed UI elements (saves 80%+ tokens)
+rgc-cli --diff-with prev.png --crop-changed -o delta.png --json
+
+# Custom pixel tolerance threshold (0-255, default: 16)
+rgc-cli --diff-with prev.png --diff-threshold 32 --json
+```
+
+#### 18. Run system diagnostics
 ```bash
 # Human-readable text report
 rgc-cli --doctor
@@ -308,7 +338,7 @@ Output:
 
 1. **`list_monitors`**: Enumerate all connected screens, resolutions, and DPI scale factors.
 2. **`capture_screen`**: Capture screen, window, stitched multi-monitor panorama, or cropped region with direct base64 image payload (`image/png`, `image/webp`, `image/jpeg`) or output file.
-   - Arguments: `monitor` (int/str), `window` (int/str), `allMonitors` (bool, multi-screen panorama), `region` (string `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `scale` (number `0.01..1.0`), `maxDimension` (int `>0`), `quality` (int `1..100`), `redactions` (array: `["100,100,200,200:blur"]` or `[{"region":"100,100,200,200","effect":"transparent"}]`), `maskWindows` (array: `["1Password", "WeChat:blur"]`), `outputPath` (string), `returnBase64` (bool).
+   - Arguments: `monitor` (int/str), `window` (int/str), `allMonitors` (bool, multi-screen panorama), `region` (string `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `scale` (number `0.01..1.0`), `maxDimension` (int `>0`), `quality` (int `1..100`), `grid` (int, pixel step), `diffWith` (string, path or Base64), `diffThreshold` (int, 0..255), `cropChanged` (bool), `redactions` (array: `["100,100,200,200:blur"]` or `[{"region":"100,100,200,200","effect":"transparent"}]`), `maskWindows` (array: `["1Password", "WeChat:blur"]`), `outputPath` (string), `returnBase64` (bool).
 3. **`doctor`**: Diagnostic check of display subsystem, active backend, and clipboard capabilities.
 
 ### Exposed MCP Resources

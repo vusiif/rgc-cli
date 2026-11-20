@@ -39,6 +39,37 @@ pub fn base64_encode(input: &[u8]) -> String {
     out
 }
 
+/// Fast, dependency-free standard base64 decoding (RFC 4648).
+pub fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0;
+
+    for &b in input.as_bytes() {
+        if b.is_ascii_whitespace() {
+            continue;
+        }
+        if b == b'=' {
+            break;
+        }
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return Err(format!("Invalid base64 character: {}", b as char)),
+        };
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
@@ -344,6 +375,22 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
                                 "items": {
                                     "type": "string"
                                 }
+                            },
+                            "grid": {
+                                "type": "integer",
+                                "description": "Optional grid step in pixels (e.g. 100 or 50) to overlay visual grounding grid lines and coordinate anchors for AI agent visual localization."
+                            },
+                            "diffWith": {
+                                "type": "string",
+                                "description": "Optional previous image file path or Base64 data to compute visual differences and changed bounding box."
+                            },
+                            "diffThreshold": {
+                                "type": "integer",
+                                "description": "Optional pixel difference threshold (0-255, default: 16) for diff calculation to ignore minor noise."
+                            },
+                            "cropChanged": {
+                                "type": "boolean",
+                                "description": "Optional flag to crop output image to only the bounding box of changed pixels compared to 'diffWith'."
                             }
                         },
                         "additionalProperties": false
@@ -859,6 +906,21 @@ fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         };
     }
 
+    let grid = arguments
+        .get("grid")
+        .and_then(|v| v.as_u64())
+        .map(|g| g as u32);
+    let diff_threshold = arguments
+        .get("diffThreshold")
+        .and_then(|v| v.as_u64())
+        .map(|t| t as u8)
+        .unwrap_or(16);
+    let crop_changed = arguments
+        .get("cropChanged")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let diff_with_str = arguments.get("diffWith").and_then(|v| v.as_str());
+
     let mut manual_masks = Vec::new();
     if let Some(redacts_val) = arguments.get("redactions") {
         if let Some(arr) = redacts_val.as_array() {
@@ -1062,9 +1124,78 @@ fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         image
     };
 
-    let image = output::apply_image_transforms(image, scale, max_dimension);
+    let mut image = output::apply_image_transforms(image, scale, max_dimension);
+
+    let mut diff_summary = None;
+    if let Some(diff_str) = diff_with_str {
+        let trimmed = diff_str.trim();
+        let ref_image = if trimmed.starts_with("data:image/")
+            || (!trimmed.contains('/') && !trimmed.contains('\\') && trimmed.len() > 100)
+        {
+            let raw_b64 = if let Some((_, rest)) = trimmed.split_once(";base64,") {
+                rest
+            } else {
+                trimmed
+            };
+            match base64_decode(raw_b64) {
+                Ok(bytes) => match image::load_from_memory(&bytes) {
+                    Ok(img) => img,
+                    Err(e) => {
+                        return ToolCallResult {
+                            content: vec![ToolContent::Text {
+                                text: format!(
+                                    "Failed to decode diff reference image from memory: {e}"
+                                ),
+                            }],
+                            is_error: true,
+                        };
+                    }
+                },
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!("Invalid base64 in 'diffWith': {e}"),
+                        }],
+                        is_error: true,
+                    };
+                }
+            }
+        } else {
+            match image::open(trimmed) {
+                Ok(img) => img,
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!(
+                                "Failed to open diff reference image from '{trimmed}': {e}"
+                            ),
+                        }],
+                        is_error: true,
+                    };
+                }
+            }
+        };
+
+        let diff = output::calculate_image_diff(&image, &ref_image, diff_threshold);
+        if crop_changed {
+            if let Some(ref bbox) = diff.bbox {
+                image = output::crop_to_diff_bbox(image, bbox, 8);
+            }
+        }
+        diff_summary = serde_json::to_string_pretty(&diff).ok();
+    }
+
+    if let Some(grid_step) = grid {
+        image = output::apply_grid_overlay(image, grid_step);
+    }
 
     let mut content = Vec::new();
+
+    if let Some(ref diff_json) = diff_summary {
+        content.push(ToolContent::Text {
+            text: format!("Diff Analysis:\n{diff_json}"),
+        });
+    }
 
     if let Some(ref path) = output_path {
         let destination = OutputDestination::File(path.clone());
@@ -1187,6 +1318,18 @@ mod tests {
         assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
         assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn test_base64_decode_rfc_vectors() {
+        assert_eq!(base64_decode("").unwrap(), b"");
+        assert_eq!(base64_decode("Zg==").unwrap(), b"f");
+        assert_eq!(base64_decode("Zm8=").unwrap(), b"fo");
+        assert_eq!(base64_decode("Zm9v").unwrap(), b"foo");
+        assert_eq!(base64_decode("Zm9vYg==").unwrap(), b"foob");
+        assert_eq!(base64_decode("Zm9vYmE=").unwrap(), b"fooba");
+        assert_eq!(base64_decode("Zm9vYmFy").unwrap(), b"foobar");
+        assert!(base64_decode("!@#$%").is_err());
     }
 
     #[test]
@@ -1411,6 +1554,18 @@ mod tests {
         assert!(resp.contains("redactions"));
         assert!(resp.contains("maskWindows"));
         assert!(resp.contains("allMonitors"));
+        assert!(resp.contains("grid"));
+        assert!(resp.contains("diffWith"));
+        assert!(resp.contains("diffThreshold"));
+        assert!(resp.contains("cropChanged"));
+    }
+
+    #[test]
+    fn test_handle_mcp_tool_call_invalid_diff_with() {
+        let req = r#"{"jsonrpc":"2.0","id":37,"method":"tools/call","params":{"name":"capture_screen","arguments":{"diffWith":"non_existent_file_path_123456.png"}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""isError":true"#));
+        assert!(resp.contains("Failed to open diff reference image"));
     }
 
     #[test]

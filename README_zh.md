@@ -26,6 +26,8 @@
 - **标准输出流式管道**: 支持将编码图像直接流式输出至标准输出 (`-o -`)，优雅处理 `BrokenPipe`，可无缝对接 `wl-copy`、`xclip`、ImageMagick、ffmpeg 或 AI 图像处理流。
 - **High-DPI 缩放感知**: 严密支持用户逻辑坐标系与显示物理像素之间的转换与 `scale_factor` 计算，在 150% 缩放、4K 与 Retina 视网膜屏上精准对齐。
 - **AI Agent 隐私脱敏与透明打孔**: 支持 `--mask <x,y,w,h[:effect]>` 与 `--mask-window <ID|TITLE[:effect]>`，提供 `transparent`（Alpha 镂空打孔）、`blackout`（黑块遮挡）、`pixelate`（马赛克）、`blur`（双线性下采样高斯模糊）四大脱敏特效。脱敏在下采样前执行，杜绝插值泄密。
+- **视觉网格定位标尺**: 支持 `--grid [STEP]` 在截图上叠加半透明辅助网格线与交叉点紧凑坐标文字（内置纯 safe Rust 3x5 像素点阵字体），为多模态 AI Agent 提供绝对视觉坐标参考系，显著提升 GUI 交互点击精准度。
+- **动态差异比对与增量截图**: 支持 `--diff-with <PATH>`、`--diff-threshold <0-255>` 与 `--crop-changed`，自动计算界面变动像素与最小外接包围盒 (`changed_bbox`)，支持仅裁剪并传输变动区域，节省 80%+ 视觉 Token 传输开销。
 - **多显示器管理与全景拼接**: 列出并支持指定屏幕索引截图（`--list-monitors`, `--monitor <INDEX>`），并独家支持 `-a, --all-monitors` 将双屏、三屏虚拟桌面自动缝合成一张超宽全景大图，跨屏负坐标与异构布局自适应。
 - **矩形区域裁剪**: 支持 `--region x,y,w,h` 裁剪，并在全屏抓取前提供快速越界预校验，节省无谓内存与 GPU 开销。
 - **原子防碰撞命名**: 自动生成的截屏文件名采用毫秒级时间戳搭配原子单调递增序列号，杜绝快速连拍下的文件覆盖。
@@ -71,6 +73,10 @@ cargo build --release
       --scale <FACTOR>        按比例缩放图像 (0.01 到 1.0 之间，例如 0.5 缩小一半)
       --max-dimension <PX>    限制图像最大宽度或高度 (像素)，保持原始纵横比
       --quality <1-100>       JPEG 输出压缩质量 (1-100，默认 85)
+      --grid [STEP]           叠加视觉定位网格线与坐标十字锚点 (默认步长: 100 像素)
+      --diff-with <PATH>      与指定的历史参考截图比对并计算变动外接矩形
+      --diff-threshold <0-255> 像素比对差异容差阈值 (默认 16)
+      --crop-changed          自动裁剪至发生变动的最小外接矩形 (需配合 --diff-with)
       --open                  截图保存后自动调用系统默认查看器打开
       --completions <SHELL>   生成终端 Tab 自动补全脚本到 stdout [可选: bash, elvish, fish, powershell, zsh]
       --json                  以结构化 JSON 格式输出结果 (非常适合自动化与 AI 智能体)
@@ -269,7 +275,31 @@ rgc-cli -a --max-dimension 2048 -o pano_low_token.webp
 rgc-cli -a --mask-window "1Password:transparent" -o pano_safe.png
 ```
 
-#### 16. 运行系统诊断检查
+#### 16. 视觉定位网格与坐标十字锚点 (AI Agent 点击精准定位)
+```bash
+# 叠加默认 100 像素步长的淡青色辅助网格与十字坐标刻度
+rgc-cli --grid -o grid_100.png
+
+# 指定 50 像素密集高精度网格
+rgc-cli --grid 50 -o grid_50.png
+
+# 全景截屏结合定位网格与下采样（供视觉 Agent 大图定位）
+rgc-cli -a --grid 100 --max-dimension 2048 -o pano_grid.webp
+```
+
+#### 17. 屏幕动态差异比对与增量 Token 裁剪 (验证 Agent 交互响应)
+```bash
+# 与上一帧截图对比，输出变动像素数与 changed_bbox
+rgc-cli --diff-with prev.png --json
+
+# 仅裁剪并保存发生变动的局部小图（节约 80%+ 传输与多模态 Token）
+rgc-cli --diff-with prev.png --crop-changed -o delta.png --json
+
+# 自定义差异灵敏度阈值 (0-255，默认 16)
+rgc-cli --diff-with prev.png --diff-threshold 32 --json
+```
+
+#### 18. 运行系统诊断检查
 ```bash
 # 人类可读文本摘要
 rgc-cli --doctor
@@ -308,7 +338,7 @@ rgc-cli --doctor --json
 
 1. **`list_monitors`**: 枚举所有屏幕、分辨率与 DPI 缩放系数。
 2. **`capture_screen`**: 捕获指定屏幕、窗口、全景多屏或局部区域，支持直接返回 Base64 编码图片数据（`image/png`, `image/webp`, `image/jpeg`）或落盘至本地文件。
-   - 参数：`monitor` (整数/字符串), `window` (窗口 ID/标题), `allMonitors` (布尔值，多屏全景拼接), `region` (字符串 `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `scale` (浮点数 `0.01..1.0`), `maxDimension` (最大像素 `>0`), `quality` (压缩质量 `1..100`), `redactions` (数组：`["100,100,200,200:blur"]` 或 `[{"region":"100,100,200,200","effect":"transparent"}]`), `maskWindows` (数组：`["1Password", "WeChat:blur"]`), `outputPath` (字符串), `returnBase64` (布尔值)。
+   - 参数：`monitor` (整数/字符串), `window` (窗口 ID/标题), `allMonitors` (布尔值，多屏全景拼接), `region` (字符串 `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `scale` (浮点数 `0.01..1.0`), `maxDimension` (最大像素 `>0`), `quality` (压缩质量 `1..100`), `grid` (网格步长整数), `diffWith` (历史图像路径或 Base64 字符串), `diffThreshold` (像素容差阈值 0-255), `cropChanged` (布尔值，自动裁剪变动外接矩形), `redactions` (数组：`["100,100,200,200:blur"]` 或 `[{"region":"100,100,200,200","effect":"transparent"}]`), `maskWindows` (数组：`["1Password", "WeChat:blur"]`), `outputPath` (字符串), `returnBase64` (布尔值)。
 3. **`doctor`**: 诊断检查当前图形显示子系统与捕获就绪状态。
 
 ### 提供的 MCP 资源 (Resources) 列表

@@ -197,7 +197,8 @@ pub struct Cli {
         conflicts_with_all = [
             "mcp", "list_monitors", "list_windows", "completions", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
-            "scale", "max_dimension", "quality", "open", "mask", "mask_window"
+            "scale", "max_dimension", "quality", "open", "mask", "mask_window",
+            "grid", "diff_with", "diff_threshold", "crop_changed"
         ]
     )]
     pub doctor: bool,
@@ -208,7 +209,8 @@ pub struct Cli {
         conflicts_with_all = [
             "doctor", "list_monitors", "list_windows", "completions", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "format",
-            "coords", "json", "scale", "max_dimension", "quality", "open", "mask", "mask_window"
+            "coords", "json", "scale", "max_dimension", "quality", "open", "mask", "mask_window",
+            "grid", "diff_with", "diff_threshold", "crop_changed"
         ]
     )]
     pub mcp: bool,
@@ -220,7 +222,8 @@ pub struct Cli {
         conflicts_with_all = [
             "doctor", "mcp", "list_windows", "completions", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
-            "scale", "max_dimension", "quality", "open", "mask", "mask_window"
+            "scale", "max_dimension", "quality", "open", "mask", "mask_window",
+            "grid", "diff_with", "diff_threshold", "crop_changed"
         ]
     )]
     pub list_monitors: bool,
@@ -231,7 +234,8 @@ pub struct Cli {
         conflicts_with_all = [
             "doctor", "mcp", "list_monitors", "completions", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
-            "scale", "max_dimension", "quality", "open", "mask", "mask_window"
+            "scale", "max_dimension", "quality", "open", "mask", "mask_window",
+            "grid", "diff_with", "diff_threshold", "crop_changed"
         ]
     )]
     pub list_windows: bool,
@@ -244,7 +248,8 @@ pub struct Cli {
         conflicts_with_all = [
             "doctor", "mcp", "list_monitors", "list_windows", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
-            "scale", "max_dimension", "quality", "format", "json", "open", "mask", "mask_window"
+            "scale", "max_dimension", "quality", "format", "json", "open", "mask", "mask_window",
+            "grid", "diff_with", "diff_threshold", "crop_changed"
         ]
     )]
     pub completions: Option<clap_complete::Shell>,
@@ -366,6 +371,28 @@ pub struct Cli {
     /// Output result as structured JSON (ideal for automation & AI agents)
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Overlay visual grounding grid lines and coordinate anchors for AI agent visual localization (default step: 100px)
+    #[arg(
+        long = "grid",
+        value_name = "STEP",
+        num_args = 0..=1,
+        default_missing_value = "100",
+        value_parser = clap::value_parser!(u32).range(10..)
+    )]
+    pub grid: Option<u32>,
+
+    /// Compare captured screen with a previous reference image file and compute difference bounding box
+    #[arg(long = "diff-with", value_name = "IMAGE_PATH")]
+    pub diff_with: Option<PathBuf>,
+
+    /// Pixel difference threshold (0-255, default: 16) for diff calculation to ignore minor noise
+    #[arg(long = "diff-threshold", value_name = "0-255", default_value_t = 16)]
+    pub diff_threshold: u8,
+
+    /// Crop captured screenshot to only the bounding box of changed pixels compared to --diff-with
+    #[arg(long = "crop-changed", requires = "diff_with")]
+    pub crop_changed: bool,
 
     /// Open captured screenshot file with system default viewer
     #[arg(
@@ -732,5 +759,39 @@ mod tests {
         // Conflict: --all-monitors and --doctor / --list-monitors
         assert!(Cli::try_parse_from(["rgc-cli", "-a", "--doctor"]).is_err());
         assert!(Cli::try_parse_from(["rgc-cli", "-a", "-l"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parsing_grid_and_diff_options() {
+        // Grid default value (100)
+        let cli_grid_default = Cli::try_parse_from(["rgc-cli", "--grid"]).unwrap();
+        assert_eq!(cli_grid_default.grid, Some(100));
+
+        // Grid explicit value
+        let cli_grid_explicit = Cli::try_parse_from(["rgc-cli", "--grid", "50"]).unwrap();
+        assert_eq!(cli_grid_explicit.grid, Some(50));
+
+        // Diff options
+        let cli_diff = Cli::try_parse_from([
+            "rgc-cli",
+            "--diff-with",
+            "prev.png",
+            "--diff-threshold",
+            "30",
+            "--crop-changed",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli_diff.diff_with,
+            Some(std::path::PathBuf::from("prev.png"))
+        );
+        assert_eq!(cli_diff.diff_threshold, 30);
+        assert!(cli_diff.crop_changed);
+
+        // crop-changed requires diff-with
+        assert!(Cli::try_parse_from(["rgc-cli", "--crop-changed"]).is_err());
+
+        // Grid conflict with doctor
+        assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--grid"]).is_err());
     }
 }

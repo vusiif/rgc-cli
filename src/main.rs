@@ -322,8 +322,41 @@ fn run(args: Cli) -> Result<(), ApiError> {
         dynamic_image
     };
 
-    let dynamic_image =
+    let mut dynamic_image =
         output::apply_image_transforms(dynamic_image, args.scale, args.max_dimension);
+
+    // 4.2 Handle diff calculation against reference image if requested
+    let diff_result = if let Some(ref diff_path) = args.diff_with {
+        let ref_image = image::open(diff_path).map_err(|e| {
+            ApiError::new(
+                ErrorCode::BadArgs,
+                format!(
+                    "Failed to open diff reference image '{}': {e}",
+                    diff_path.display()
+                ),
+            )
+            .with_stage("diff_comparison")
+            .with_suggestion("Check that the reference path points to a valid readable image.")
+        })?;
+
+        let diff = output::calculate_image_diff(&dynamic_image, &ref_image, args.diff_threshold);
+
+        if args.crop_changed {
+            if let Some(ref bbox) = diff.bbox {
+                dynamic_image = output::crop_to_diff_bbox(dynamic_image, bbox, 8);
+            }
+        }
+
+        Some(diff)
+    } else {
+        None
+    };
+
+    // 4.3 Apply visual grounding grid overlay if requested
+    if let Some(grid_step) = args.grid {
+        dynamic_image = output::apply_grid_overlay(dynamic_image, grid_step);
+    }
+
     let img_width = dynamic_image.width();
     let img_height = dynamic_image.height();
 
@@ -354,6 +387,12 @@ fn run(args: Cli) -> Result<(), ApiError> {
 
         if !args.quiet && !args.json {
             println!("Screenshot successfully saved to: {}", saved_path.display());
+            if let Some(ref diff) = diff_result {
+                println!(
+                    "Diff Analysis: changed={}, changedPixels={} ({:.2}%), bbox={:?}",
+                    diff.changed, diff.changed_pixels, diff.changed_percent, diff.bbox
+                );
+            }
         }
 
         if args.open {
@@ -373,6 +412,7 @@ fn run(args: Cli) -> Result<(), ApiError> {
             format,
             clipboard: args.clipboard,
             size_bytes: file_size_bytes,
+            diff: diff_result,
         };
         let response = ApiResponse::success(result_payload);
         let json_str = serde_json::to_string_pretty(&response).map_err(|e| {
