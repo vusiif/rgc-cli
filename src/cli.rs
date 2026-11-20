@@ -109,7 +109,7 @@ pub struct Cli {
     #[arg(
         long = "doctor",
         conflicts_with_all = [
-            "mcp", "list_monitors", "completions", "monitor", "region", "output",
+            "mcp", "list_monitors", "list_windows", "completions", "monitor", "window", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open"
         ]
@@ -120,7 +120,7 @@ pub struct Cli {
     #[arg(
         long = "mcp",
         conflicts_with_all = [
-            "doctor", "list_monitors", "completions", "monitor", "region", "output",
+            "doctor", "list_monitors", "list_windows", "completions", "monitor", "window", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "format",
             "coords", "json", "scale", "max_dimension", "quality", "open"
         ]
@@ -132,12 +132,23 @@ pub struct Cli {
         short = 'l',
         long = "list-monitors",
         conflicts_with_all = [
-            "doctor", "mcp", "completions", "monitor", "region", "output",
+            "doctor", "mcp", "list_windows", "completions", "monitor", "window", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open"
         ]
     )]
     pub list_monitors: bool,
+
+    /// List all active application windows and exit
+    #[arg(
+        long = "list-windows",
+        conflicts_with_all = [
+            "doctor", "mcp", "list_monitors", "completions", "monitor", "window", "region", "output",
+            "output_file", "output_dir", "clipboard", "delay", "coords",
+            "scale", "max_dimension", "quality", "open"
+        ]
+    )]
+    pub list_windows: bool,
 
     /// Generate shell completion script to stdout (bash, zsh, fish, powershell, elvish)
     #[arg(
@@ -145,7 +156,7 @@ pub struct Cli {
         value_name = "SHELL",
         value_enum,
         conflicts_with_all = [
-            "doctor", "mcp", "list_monitors", "monitor", "region", "output",
+            "doctor", "mcp", "list_monitors", "list_windows", "monitor", "window", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "format", "json", "open"
         ]
@@ -153,8 +164,22 @@ pub struct Cli {
     pub completions: Option<clap_complete::Shell>,
 
     /// Monitor index to capture (0-indexed). Defaults to primary monitor
-    #[arg(short = 'm', long = "monitor", value_name = "INDEX")]
+    #[arg(
+        short = 'm',
+        long = "monitor",
+        value_name = "INDEX",
+        conflicts_with = "window"
+    )]
     pub monitor: Option<usize>,
+
+    /// Window to capture by ID or title substring (e.g. -w 1234 or -w "Code")
+    #[arg(
+        short = 'w',
+        long = "window",
+        value_name = "ID|TITLE",
+        conflicts_with = "monitor"
+    )]
+    pub window: Option<String>,
 
     /// Region to capture in coordinates: 'x,y,w,h' (e.g. 100,100,800,600)
     #[arg(short = 'r', long = "region", value_name = "x,y,w,h")]
@@ -234,7 +259,7 @@ pub struct Cli {
     /// Open captured screenshot file with system default viewer
     #[arg(
         long = "open",
-        conflicts_with_all = ["doctor", "mcp", "list_monitors", "completions"]
+        conflicts_with_all = ["doctor", "mcp", "list_monitors", "list_windows", "completions"]
     )]
     pub open: bool,
 
@@ -402,6 +427,25 @@ mod tests {
         // mcp conflicts with CLI formatting/output options
         assert!(Cli::try_parse_from(["rgc-cli", "--mcp", "--json"]).is_err());
         assert!(Cli::try_parse_from(["rgc-cli", "--mcp", "-d", "1000"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parsing_window_options() {
+        let cli_win = Cli::try_parse_from(["rgc-cli", "-w", "12345"]).unwrap();
+        assert_eq!(cli_win.window, Some("12345".to_string()));
+        assert_eq!(cli_win.monitor, None);
+
+        let cli_win_title =
+            Cli::try_parse_from(["rgc-cli", "--window", "Code", "-o", "out.png"]).unwrap();
+        assert_eq!(cli_win_title.window, Some("Code".to_string()));
+
+        // Conflict: --window and --monitor
+        assert!(Cli::try_parse_from(["rgc-cli", "-w", "123", "-m", "0"]).is_err());
+
+        // Conflict: --list-windows and capture options
+        assert!(Cli::try_parse_from(["rgc-cli", "--list-windows", "-o", "out.png"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "--list-windows", "-w", "123"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "--list-windows", "-l"]).is_err());
     }
 
     #[test]

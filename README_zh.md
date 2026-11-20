@@ -53,7 +53,9 @@ cargo build --release
       --doctor                运行系统诊断环境检查，查看屏幕捕获与剪贴板就绪状态
       --mcp                   启动 Model Context Protocol (MCP) stdio 服务端供 AI 助手对接
   -l, --list-monitors         列出所有可用显示器并退出
+      --list-windows          列出所有活动的应用程序窗口并退出
   -m, --monitor <INDEX>       指定要捕获的显示器索引 (从 0 开始，默认为主显示器)
+  -w, --window <ID|TITLE>     通过窗口 ID 或标题子串捕获特定窗口 (如 -w 1234 或 -w "Code")
   -r, --region <x,y,w,h>      指定截取矩形区域坐标: 'x,y,w,h' (例如 '100,100,800,600')
       --coords <MODE>         区域坐标系: 'logical' (默认，按 DPI 缩放) 或 'physical' (原始物理像素)
   -o, --output <PATH>         输出文件路径、目录或 '-' (流式输出至 stdout)。默认为当前目录带时间戳文件
@@ -213,7 +215,22 @@ rgc-cli --completions bash > /etc/bash_completion.d/rgc-cli
 rgc-cli --completions zsh > "${fpath[1]}/_rgc-cli"
 ```
 
-#### 10. 运行系统诊断检查
+#### 13. 窗口级别精准捕获
+```bash
+# 枚举当前所有活动窗口（ID、进程名、标题、尺寸）
+rgc-cli --list-windows
+
+# 通过窗口标题（模糊匹配，忽略大小写）截取窗口
+rgc-cli -w "Visual Studio Code" -o vscode.png
+
+# 通过窗口数字 ID 截取窗口并在默认看图工具中打开
+rgc-cli -w 197430 --open
+
+# 窗口内局部坐标二次裁剪
+rgc-cli -w "Chrome" -r 0,0,800,600 -o browser_top.png
+```
+
+#### 14. 运行系统诊断检查
 ```bash
 # 人类可读文本摘要
 rgc-cli --doctor

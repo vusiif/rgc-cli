@@ -53,7 +53,9 @@ Options:
       --doctor                Run diagnostic environment check and inspect capture capabilities
       --mcp                   Start Model Context Protocol (MCP) stdio server for AI agent automation
   -l, --list-monitors         List all available monitors and exit
+      --list-windows          List all active application windows and exit
   -m, --monitor <INDEX>       Monitor index to capture (0-indexed). Defaults to primary monitor
+  -w, --window <ID|TITLE>     Capture a specific window by ID or title substring (e.g. -w 1234 or -w "Code")
   -r, --region <x,y,w,h>      Region to capture in coordinates: 'x,y,w,h' (e.g. 100,100,800,600)
       --coords <MODE>         Coordinate system for region: 'logical' (default, scaled by DPI) or 'physical' (raw pixels)
   -o, --output <PATH>         Output file path, directory, or '-' for stdout stream. Defaults to timestamped file in CWD
@@ -213,7 +215,22 @@ rgc-cli --completions bash > /etc/bash_completion.d/rgc-cli
 rgc-cli --completions zsh > "${fpath[1]}/_rgc-cli"
 ```
 
-#### 10. Run system diagnostics
+#### 13. Window-Level Precise Capture
+```bash
+# List all active windows (titles, processes, IDs)
+rgc-cli --list-windows
+
+# Capture a specific window by title substring (case-insensitive)
+rgc-cli -w "Visual Studio Code" -o vscode.png
+
+# Capture a window by numeric window ID and open immediately
+rgc-cli -w 197430 --open
+
+# Window capture with regional crop inside the window
+rgc-cli -w "Chrome" -r 0,0,800,600 -o browser_top.png
+```
+
+#### 14. Run system diagnostics
 ```bash
 # Human-readable text report
 rgc-cli --doctor

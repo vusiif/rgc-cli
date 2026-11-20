@@ -9,6 +9,7 @@ pub struct DoctorReport {
     pub backend: String,
     pub monitors_detected: usize,
     pub primary_monitor: Option<String>,
+    pub windows_detected: usize,
     pub clipboard_available: bool,
     pub supported_formats: Vec<String>,
     pub status: String,
@@ -53,6 +54,10 @@ pub fn run_doctor() -> DoctorReport {
         Err(_) => (0, None),
     };
 
+    let windows_detected = crate::capture::get_window_infos()
+        .map(|w| w.len())
+        .unwrap_or(0);
+
     let clipboard_available = arboard::Clipboard::new().is_ok();
 
     let supported_formats = vec![
@@ -75,6 +80,7 @@ pub fn run_doctor() -> DoctorReport {
         backend,
         monitors_detected,
         primary_monitor,
+        windows_detected,
         clipboard_available,
         supported_formats,
         status,

@@ -97,6 +97,7 @@ fn run(args: Cli) -> Result<(), ApiError> {
         if let Some(prim) = report.primary_monitor {
             println!("Primary Display:     {}", prim);
         }
+        println!("Windows Detected:    {}", report.windows_detected);
         println!(
             "Clipboard Access:    {}",
             if report.clipboard_available {
@@ -143,6 +144,51 @@ fn run(args: Cli) -> Result<(), ApiError> {
             println!("    Resolution:   {} x {}", m.width, m.height);
             println!("    Scale Factor: {:.2}x", m.scale_factor);
             println!("{:-<60}", "");
+        }
+        return Ok(());
+    }
+
+    // 2.1 Handle window listing if requested
+    if args.list_windows {
+        let windows = capture::get_window_infos()?;
+
+        if args.json {
+            let response = ApiResponse::success(windows);
+            let json_str = serde_json::to_string_pretty(&response).map_err(|e| {
+                ApiError::new(
+                    ErrorCode::EncodeFailed,
+                    format!("JSON serialization failed: {e}"),
+                )
+            })?;
+            println!("{}", json_str);
+            return Ok(());
+        }
+
+        if windows.is_empty() {
+            println!("No active application windows detected.");
+            return Ok(());
+        }
+
+        println!("Available Windows (total: {}):", windows.len());
+        println!("{:-<75}", "");
+        for w in windows {
+            let status = if w.is_minimized {
+                "Minimized"
+            } else {
+                "Visible"
+            };
+            let app = if w.app_name.is_empty() {
+                "Unknown"
+            } else {
+                &w.app_name
+            };
+            println!("[ID: {}] {} ({})", w.id, w.title, app);
+            println!(
+                "    Position:     {}, {} ({} x {})",
+                w.x, w.y, w.width, w.height
+            );
+            println!("    State:        {}", status);
+            println!("{:-<75}", "");
         }
         return Ok(());
     }
@@ -212,12 +258,20 @@ fn run(args: Cli) -> Result<(), ApiError> {
         }
     }
 
-    // 4. Perform capture with monitor selection & optional region cropping
-    debug!(
-        "Initiating capture (monitor={:?}, region={:?}, coords={:?})",
-        args.monitor, args.region, args.coords
-    );
-    let dynamic_image = capture::capture_screen(args.monitor, args.region.as_ref(), args.coords)?;
+    // 4. Perform capture with window selection OR monitor selection with optional region cropping
+    let dynamic_image = if let Some(ref win_query) = args.window {
+        debug!(
+            "Initiating window capture (query={:?}, region={:?})",
+            win_query, args.region
+        );
+        capture::capture_window_with_crop(win_query, args.region.as_ref())?
+    } else {
+        debug!(
+            "Initiating monitor capture (monitor={:?}, region={:?}, coords={:?})",
+            args.monitor, args.region, args.coords
+        );
+        capture::capture_screen(args.monitor, args.region.as_ref(), args.coords)?
+    };
     let dynamic_image =
         output::apply_image_transforms(dynamic_image, args.scale, args.max_dimension);
     let img_width = dynamic_image.width();

@@ -261,14 +261,27 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
                     }),
                 },
                 ToolDefinition {
+                    name: "list_windows".to_string(),
+                    description: "List all active application windows with window ID, title, application/process name, coordinates, dimensions, and minimized state.".to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }),
+                },
+                ToolDefinition {
                     name: "capture_screen".to_string(),
-                    description: "Capture screen image from a monitor or rectangular region. Can return image base64 data directly or save to a file path.".to_string(),
+                    description: "Capture screen image from a monitor, application window, or rectangular region. Can return image base64 data directly or save to a file path.".to_string(),
                     input_schema: serde_json::json!({
                         "type": "object",
                         "properties": {
                             "monitor": {
                                 "type": "integer",
-                                "description": "0-indexed monitor index. If omitted, captures primary display."
+                                "description": "0-indexed monitor index. If omitted and window is omitted, captures primary display."
+                            },
+                            "window": {
+                                "type": "string",
+                                "description": "Optional window ID (e.g. '1234') or window title/app name to capture a specific application window instead of a monitor."
                             },
                             "region": {
                                 "type": "string",
@@ -374,6 +387,22 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
                 }
             }
 
+            if let Ok(windows) = capture::get_window_infos() {
+                for w in windows.iter().take(10) {
+                    if !w.is_minimized && !w.title.is_empty() {
+                        resources.push(ResourceDefinition {
+                            uri: format!("screen://window/{}", w.id),
+                            name: format!("Window #{} ({})", w.id, w.title),
+                            description: Some(format!(
+                                "Live snapshot of application window '{}' ({}x{} @ {},{})",
+                                w.app_name, w.width, w.height, w.x, w.y
+                            )),
+                            mime_type: Some("image/png".to_string()),
+                        });
+                    }
+                }
+            }
+
             resources.push(ResourceDefinition {
                 uri: "screen://diagnostics".to_string(),
                 name: "System Diagnostics Report".to_string(),
@@ -392,14 +421,24 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
             serde_json::to_string(&res).ok()
         }
         "resources/templates/list" => {
-            let templates = vec![ResourceTemplateDefinition {
-                uri_template: "screen://monitor/{index}".to_string(),
-                name: "Monitor Display Snapshot".to_string(),
-                description: Some(
-                    "Capture a live snapshot of a specific monitor by zero-based numeric index (e.g. screen://monitor/0)".to_string(),
-                ),
-                mime_type: Some("image/png".to_string()),
-            }];
+            let templates = vec![
+                ResourceTemplateDefinition {
+                    uri_template: "screen://monitor/{index}".to_string(),
+                    name: "Monitor Display Snapshot".to_string(),
+                    description: Some(
+                        "Capture a live snapshot of a specific monitor by zero-based numeric index (e.g. screen://monitor/0)".to_string(),
+                    ),
+                    mime_type: Some("image/png".to_string()),
+                },
+                ResourceTemplateDefinition {
+                    uri_template: "screen://window/{id}".to_string(),
+                    name: "Application Window Snapshot".to_string(),
+                    description: Some(
+                        "Capture a live snapshot of an application window by unique numeric ID (e.g. screen://window/1234)".to_string(),
+                    ),
+                    mime_type: Some("image/png".to_string()),
+                },
+            ];
 
             let res = JsonRpcResponse {
                 jsonrpc: "2.0",
@@ -515,6 +554,27 @@ fn read_resource(uri: &str) -> Result<ResourceReadResult, JsonRpcError> {
                 blob,
             }],
         })
+    } else if let Some(win_id_str) = uri.strip_prefix("screen://window/") {
+        let image = capture::capture_window(win_id_str).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to capture window for '{uri}': {e}"),
+            data: None,
+        })?;
+        let bytes = output::encode_image_bytes(&image, ImageFormat::Png, None).map_err(|e| {
+            JsonRpcError {
+                code: -32000,
+                message: format!("Failed to encode image to PNG: {e}"),
+                data: None,
+            }
+        })?;
+        let blob = base64_encode(&bytes);
+        Ok(ResourceReadResult {
+            contents: vec![ResourceContent::Blob {
+                uri: uri.to_string(),
+                mime_type: Some("image/png".to_string()),
+                blob,
+            }],
+        })
     } else if uri == "screen://diagnostics" || uri == "screen://doctor" {
         let report = doctor::run_doctor();
         let text = serde_json::to_string_pretty(&report).map_err(|e| JsonRpcError {
@@ -556,6 +616,26 @@ fn execute_tool_call(name: &str, arguments: &serde_json::Value) -> ToolCallResul
             Err(e) => ToolCallResult {
                 content: vec![ToolContent::Text {
                     text: format!("Failed to list monitors: {e}"),
+                }],
+                is_error: true,
+            },
+        },
+        "list_windows" => match capture::get_window_infos() {
+            Ok(windows) => match serde_json::to_string_pretty(&windows) {
+                Ok(text) => ToolCallResult {
+                    content: vec![ToolContent::Text { text }],
+                    is_error: false,
+                },
+                Err(e) => ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Serialization failed: {e}"),
+                    }],
+                    is_error: true,
+                },
+            },
+            Err(e) => ToolCallResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Failed to list windows: {e}"),
                 }],
                 is_error: true,
             },
@@ -720,15 +800,29 @@ fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         };
     }
 
-    let image = match capture::capture_screen(monitor, region.as_ref(), coords) {
-        Ok(img) => img,
-        Err(e) => {
-            return ToolCallResult {
-                content: vec![ToolContent::Text {
-                    text: format!("Capture failed: {e}"),
-                }],
-                is_error: true,
-            };
+    let image = if let Some(win_query) = arguments.get("window").and_then(|v| v.as_str()) {
+        match capture::capture_window_with_crop(win_query, region.as_ref()) {
+            Ok(img) => img,
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Window capture failed: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        }
+    } else {
+        match capture::capture_screen(monitor, region.as_ref(), coords) {
+            Ok(img) => img,
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Capture failed: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
         }
     };
 
@@ -1034,6 +1128,44 @@ mod tests {
         let resp = handle_mcp_message(req).expect("response expected");
         assert!(resp.contains(r#""code":-32602"#));
         assert!(resp.contains("Invalid monitor index"));
+    }
+
+    #[test]
+    fn test_handle_mcp_tools_list_has_windows() {
+        let req = r#"{"jsonrpc":"2.0","id":26,"method":"tools/list"}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains("list_windows"));
+        assert!(resp.contains("window"));
+    }
+
+    #[test]
+    fn test_handle_mcp_tool_call_list_windows() {
+        let req = r#"{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"list_windows","arguments":{}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""id":27"#));
+    }
+
+    #[test]
+    fn test_handle_mcp_tool_call_capture_window_nonexistent() {
+        let req = r#"{"jsonrpc":"2.0","id":28,"method":"tools/call","params":{"name":"capture_screen","arguments":{"window":"nonexistent_window_123456"}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""isError":true"#));
+        assert!(resp.contains("Window capture failed") || resp.contains("No window found"));
+    }
+
+    #[test]
+    fn test_handle_mcp_resources_templates_list_has_window() {
+        let req = r#"{"jsonrpc":"2.0","id":29,"method":"resources/templates/list"}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains("screen://window/{id}"));
+    }
+
+    #[test]
+    fn test_handle_mcp_resources_read_window_nonexistent() {
+        let req = r#"{"jsonrpc":"2.0","id":30,"method":"resources/read","params":{"uri":"screen://window/9999999"}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""code":-32000"#));
+        assert!(resp.contains("Failed to capture window"));
     }
 
     #[test]
