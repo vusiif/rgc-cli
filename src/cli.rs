@@ -781,10 +781,7 @@ mod tests {
             "--crop-changed",
         ])
         .unwrap();
-        assert_eq!(
-            cli_diff.diff_with,
-            Some(PathBuf::from("prev.png"))
-        );
+        assert_eq!(cli_diff.diff_with, Some(PathBuf::from("prev.png")));
         assert_eq!(cli_diff.diff_threshold, 30);
         assert!(cli_diff.crop_changed);
 

@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 
-mod capture;
-mod cli;
-mod doctor;
-mod mcp;
-mod output;
+pub mod api;
+pub mod capture;
+pub mod cli;
+pub mod doctor;
+pub mod mcp;
+pub mod output;
+pub mod transform;
 
 use clap::Parser;
 use cli::Cli;
