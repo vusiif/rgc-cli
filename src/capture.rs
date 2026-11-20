@@ -691,7 +691,13 @@ pub fn capture_window_with_details(
     if let Some(r) = region {
         let actual_w = img.width();
         let actual_h = img.height();
-        if r.x < 0 || r.y < 0 {
+        let out_of_bounds = r.x < 0
+            || r.y < 0
+            || (r.x as u32) >= actual_w
+            || (r.y as u32) >= actual_h
+            || r.width > actual_w - (r.x as u32)
+            || r.height > actual_h - (r.y as u32);
+        if out_of_bounds {
             return Err(CaptureError::RegionOutOfBounds {
                 x: r.x,
                 y: r.y,
@@ -703,16 +709,6 @@ pub fn capture_window_with_details(
         }
         let rx = r.x as u32;
         let ry = r.y as u32;
-        if rx >= actual_w || ry >= actual_h || r.width > actual_w - rx || r.height > actual_h - ry {
-            return Err(CaptureError::RegionOutOfBounds {
-                x: r.x,
-                y: r.y,
-                width: r.width,
-                height: r.height,
-                monitor_w: actual_w,
-                monitor_h: actual_h,
-            });
-        }
         debug!(
             "Cropping window image to region: x={}, y={}, w={}, h={}",
             rx, ry, r.width, r.height

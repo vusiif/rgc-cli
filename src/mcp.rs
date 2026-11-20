@@ -586,6 +586,27 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
     }
 }
 
+fn image_to_blob_resource(
+    uri: &str,
+    image: &image::DynamicImage,
+) -> Result<ResourceReadResult, JsonRpcError> {
+    let bytes = output::encode_image_bytes(image, ImageFormat::Png, None).map_err(|e| {
+        JsonRpcError {
+            code: -32000,
+            message: format!("Failed to encode image to PNG: {e}"),
+            data: None,
+        }
+    })?;
+    let blob = base64_encode(&bytes);
+    Ok(ResourceReadResult {
+        contents: vec![ResourceContent::Blob {
+            uri: uri.to_string(),
+            mime_type: Some("image/png".to_string()),
+            blob,
+        }],
+    })
+}
+
 fn read_resource(uri: &str) -> Result<ResourceReadResult, JsonRpcError> {
     if uri == "screen://current" || uri == "screen://primary" {
         let image =
@@ -594,21 +615,7 @@ fn read_resource(uri: &str) -> Result<ResourceReadResult, JsonRpcError> {
                 message: format!("Failed to capture current screen for '{uri}': {e}"),
                 data: None,
             })?;
-        let bytes = output::encode_image_bytes(&image, ImageFormat::Png, None).map_err(|e| {
-            JsonRpcError {
-                code: -32000,
-                message: format!("Failed to encode image to PNG: {e}"),
-                data: None,
-            }
-        })?;
-        let blob = base64_encode(&bytes);
-        Ok(ResourceReadResult {
-            contents: vec![ResourceContent::Blob {
-                uri: uri.to_string(),
-                mime_type: Some("image/png".to_string()),
-                blob,
-            }],
-        })
+        image_to_blob_resource(uri, &image)
     } else if uri == "screen://all" || uri == "screen://panorama" {
         let image =
             capture::capture_all_monitors(None, CoordMode::Logical).map_err(|e| JsonRpcError {
@@ -616,21 +623,7 @@ fn read_resource(uri: &str) -> Result<ResourceReadResult, JsonRpcError> {
                 message: format!("Failed to capture all monitors panorama for '{uri}': {e}"),
                 data: None,
             })?;
-        let bytes = output::encode_image_bytes(&image, ImageFormat::Png, None).map_err(|e| {
-            JsonRpcError {
-                code: -32000,
-                message: format!("Failed to encode image to PNG: {e}"),
-                data: None,
-            }
-        })?;
-        let blob = base64_encode(&bytes);
-        Ok(ResourceReadResult {
-            contents: vec![ResourceContent::Blob {
-                uri: uri.to_string(),
-                mime_type: Some("image/png".to_string()),
-                blob,
-            }],
-        })
+        image_to_blob_resource(uri, &image)
     } else if let Some(idx_str) = uri.strip_prefix("screen://monitor/") {
         let monitor_idx: usize = idx_str.trim().parse().map_err(|_| JsonRpcError {
             code: -32602,
@@ -645,42 +638,14 @@ fn read_resource(uri: &str) -> Result<ResourceReadResult, JsonRpcError> {
                     data: None,
                 }
             })?;
-        let bytes = output::encode_image_bytes(&image, ImageFormat::Png, None).map_err(|e| {
-            JsonRpcError {
-                code: -32000,
-                message: format!("Failed to encode image to PNG: {e}"),
-                data: None,
-            }
-        })?;
-        let blob = base64_encode(&bytes);
-        Ok(ResourceReadResult {
-            contents: vec![ResourceContent::Blob {
-                uri: uri.to_string(),
-                mime_type: Some("image/png".to_string()),
-                blob,
-            }],
-        })
+        image_to_blob_resource(uri, &image)
     } else if let Some(win_id_str) = uri.strip_prefix("screen://window/") {
         let image = capture::capture_window(win_id_str).map_err(|e| JsonRpcError {
             code: -32000,
             message: format!("Failed to capture window for '{uri}': {e}"),
             data: None,
         })?;
-        let bytes = output::encode_image_bytes(&image, ImageFormat::Png, None).map_err(|e| {
-            JsonRpcError {
-                code: -32000,
-                message: format!("Failed to encode image to PNG: {e}"),
-                data: None,
-            }
-        })?;
-        let blob = base64_encode(&bytes);
-        Ok(ResourceReadResult {
-            contents: vec![ResourceContent::Blob {
-                uri: uri.to_string(),
-                mime_type: Some("image/png".to_string()),
-                blob,
-            }],
-        })
+        image_to_blob_resource(uri, &image)
     } else if uri == "screen://diagnostics" || uri == "screen://doctor" {
         let report = doctor::run_doctor();
         let text = serde_json::to_string_pretty(&report).map_err(|e| JsonRpcError {
@@ -704,21 +669,25 @@ fn read_resource(uri: &str) -> Result<ResourceReadResult, JsonRpcError> {
     }
 }
 
+fn json_tool_result<T: serde::Serialize>(val: &T) -> ToolCallResult {
+    match serde_json::to_string_pretty(val) {
+        Ok(text) => ToolCallResult {
+            content: vec![ToolContent::Text { text }],
+            is_error: false,
+        },
+        Err(e) => ToolCallResult {
+            content: vec![ToolContent::Text {
+                text: format!("Serialization failed: {e}"),
+            }],
+            is_error: true,
+        },
+    }
+}
+
 fn execute_tool_call(name: &str, arguments: &serde_json::Value) -> ToolCallResult {
     match name {
         "list_monitors" => match capture::get_monitor_infos() {
-            Ok(monitors) => match serde_json::to_string_pretty(&monitors) {
-                Ok(text) => ToolCallResult {
-                    content: vec![ToolContent::Text { text }],
-                    is_error: false,
-                },
-                Err(e) => ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Serialization failed: {e}"),
-                    }],
-                    is_error: true,
-                },
-            },
+            Ok(monitors) => json_tool_result(&monitors),
             Err(e) => ToolCallResult {
                 content: vec![ToolContent::Text {
                     text: format!("Failed to list monitors: {e}"),
@@ -727,18 +696,7 @@ fn execute_tool_call(name: &str, arguments: &serde_json::Value) -> ToolCallResul
             },
         },
         "list_windows" => match capture::get_window_infos() {
-            Ok(windows) => match serde_json::to_string_pretty(&windows) {
-                Ok(text) => ToolCallResult {
-                    content: vec![ToolContent::Text { text }],
-                    is_error: false,
-                },
-                Err(e) => ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Serialization failed: {e}"),
-                    }],
-                    is_error: true,
-                },
-            },
+            Ok(windows) => json_tool_result(&windows),
             Err(e) => ToolCallResult {
                 content: vec![ToolContent::Text {
                     text: format!("Failed to list windows: {e}"),
@@ -748,18 +706,7 @@ fn execute_tool_call(name: &str, arguments: &serde_json::Value) -> ToolCallResul
         },
         "doctor" => {
             let report = doctor::run_doctor();
-            match serde_json::to_string_pretty(&report) {
-                Ok(text) => ToolCallResult {
-                    content: vec![ToolContent::Text { text }],
-                    is_error: false,
-                },
-                Err(e) => ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Serialization failed: {e}"),
-                    }],
-                    is_error: true,
-                },
-            }
+            json_tool_result(&report)
         }
         "capture_screen" => execute_capture_tool(arguments),
         _ => ToolCallResult {

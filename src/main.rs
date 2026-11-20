@@ -78,15 +78,7 @@ fn run(args: Cli) -> Result<(), ApiError> {
     if args.doctor {
         let report = doctor::run_doctor();
         if args.json {
-            let response = ApiResponse::success(report);
-            let json_str = serde_json::to_string_pretty(&response).map_err(|e| {
-                ApiError::new(
-                    ErrorCode::EncodeFailed,
-                    format!("JSON serialization failed: {e}"),
-                )
-            })?;
-            println!("{}", json_str);
-            return Ok(());
+            return print_json_success(report);
         }
 
         println!("[rgc-cli Diagnostics Report]");
@@ -120,15 +112,7 @@ fn run(args: Cli) -> Result<(), ApiError> {
         let monitors = capture::get_monitor_infos()?;
 
         if args.json {
-            let response = ApiResponse::success(monitors);
-            let json_str = serde_json::to_string_pretty(&response).map_err(|e| {
-                ApiError::new(
-                    ErrorCode::EncodeFailed,
-                    format!("JSON serialization failed: {e}"),
-                )
-            })?;
-            println!("{}", json_str);
-            return Ok(());
+            return print_json_success(monitors);
         }
 
         if monitors.is_empty() {
@@ -153,15 +137,7 @@ fn run(args: Cli) -> Result<(), ApiError> {
         let windows = capture::get_window_infos()?;
 
         if args.json {
-            let response = ApiResponse::success(windows);
-            let json_str = serde_json::to_string_pretty(&response).map_err(|e| {
-                ApiError::new(
-                    ErrorCode::EncodeFailed,
-                    format!("JSON serialization failed: {e}"),
-                )
-            })?;
-            println!("{}", json_str);
-            return Ok(());
+            return print_json_success(windows);
         }
 
         if windows.is_empty() {
@@ -414,15 +390,20 @@ fn run(args: Cli) -> Result<(), ApiError> {
             size_bytes: file_size_bytes,
             diff: diff_result,
         };
-        let response = ApiResponse::success(result_payload);
-        let json_str = serde_json::to_string_pretty(&response).map_err(|e| {
-            ApiError::new(
-                ErrorCode::EncodeFailed,
-                format!("JSON serialization failed: {e}"),
-            )
-        })?;
-        println!("{}", json_str);
+        print_json_success(result_payload)?;
     }
 
+    Ok(())
+}
+
+fn print_json_success<T: serde::Serialize>(data: T) -> Result<(), ApiError> {
+    let response = ApiResponse::success(data);
+    let json_str = serde_json::to_string_pretty(&response).map_err(|e| {
+        ApiError::new(
+            ErrorCode::EncodeFailed,
+            format!("JSON serialization failed: {e}"),
+        )
+    })?;
+    println!("{}", json_str);
     Ok(())
 }

@@ -577,8 +577,8 @@ pub fn apply_redaction(
     // Defensive clipping to image boundaries
     let x0 = x.min(img_w);
     let y0 = y.min(img_h);
-    let x1 = (x.saturating_add(width)).min(img_w);
-    let y1 = (y.saturating_add(height)).min(img_h);
+    let x1 = x.saturating_add(width).min(img_w);
+    let y1 = y.saturating_add(height).min(img_h);
 
     if x0 >= x1 || y0 >= y1 {
         return;
@@ -1211,30 +1211,30 @@ mod tests {
 
     #[test]
     fn test_apply_redaction_transparent() {
-        let mut img = RgbaImage::from_pixel(100, 100, image::Rgba([255, 0, 0, 255]));
+        let mut img = RgbaImage::from_pixel(100, 100, Rgba([255, 0, 0, 255]));
         apply_redaction(&mut img, 10, 10, 20, 20, MaskEffect::Transparent);
 
         // Inside masked hole: alpha should be 0
-        assert_eq!(img.get_pixel(10, 10), &image::Rgba([0, 0, 0, 0]));
-        assert_eq!(img.get_pixel(29, 29), &image::Rgba([0, 0, 0, 0]));
+        assert_eq!(img.get_pixel(10, 10), &Rgba([0, 0, 0, 0]));
+        assert_eq!(img.get_pixel(29, 29), &Rgba([0, 0, 0, 0]));
 
         // Outside masked hole: should still be original red
-        assert_eq!(img.get_pixel(9, 9), &image::Rgba([255, 0, 0, 255]));
-        assert_eq!(img.get_pixel(30, 30), &image::Rgba([255, 0, 0, 255]));
+        assert_eq!(img.get_pixel(9, 9), &Rgba([255, 0, 0, 255]));
+        assert_eq!(img.get_pixel(30, 30), &Rgba([255, 0, 0, 255]));
     }
 
     #[test]
     fn test_apply_redaction_blackout() {
-        let mut img = RgbaImage::from_pixel(100, 100, image::Rgba([255, 255, 255, 255]));
+        let mut img = RgbaImage::from_pixel(100, 100, Rgba([255, 255, 255, 255]));
         apply_redaction(&mut img, 5, 5, 10, 10, MaskEffect::Blackout);
 
         // Inside masked hole: solid black
-        assert_eq!(img.get_pixel(5, 5), &image::Rgba([0, 0, 0, 255]));
-        assert_eq!(img.get_pixel(14, 14), &image::Rgba([0, 0, 0, 255]));
+        assert_eq!(img.get_pixel(5, 5), &Rgba([0, 0, 0, 255]));
+        assert_eq!(img.get_pixel(14, 14), &Rgba([0, 0, 0, 255]));
 
         // Outside masked hole: white
-        assert_eq!(img.get_pixel(4, 4), &image::Rgba([255, 255, 255, 255]));
-        assert_eq!(img.get_pixel(15, 15), &image::Rgba([255, 255, 255, 255]));
+        assert_eq!(img.get_pixel(4, 4), &Rgba([255, 255, 255, 255]));
+        assert_eq!(img.get_pixel(15, 15), &Rgba([255, 255, 255, 255]));
     }
 
     #[test]
@@ -1242,7 +1242,7 @@ mod tests {
         let mut img = RgbaImage::new(100, 100);
         for y in 0..100 {
             for x in 0..100 {
-                img.put_pixel(x, y, image::Rgba([(x * 2) as u8, (y * 2) as u8, 128, 255]));
+                img.put_pixel(x, y, Rgba([(x * 2) as u8, (y * 2) as u8, 128, 255]));
             }
         }
 
@@ -1266,7 +1266,7 @@ mod tests {
         let img = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
             50,
             50,
-            image::Rgba([100, 100, 100, 255]),
+            Rgba([100, 100, 100, 255]),
         ));
         let masks = vec![
             (0, 0, 10, 10, MaskEffect::Transparent),
@@ -1275,25 +1275,25 @@ mod tests {
         let redacted = apply_redactions(img, &masks);
         let rgba = redacted.into_rgba8();
 
-        assert_eq!(rgba.get_pixel(0, 0), &image::Rgba([0, 0, 0, 0]));
-        assert_eq!(rgba.get_pixel(20, 20), &image::Rgba([0, 0, 0, 255]));
-        assert_eq!(rgba.get_pixel(40, 40), &image::Rgba([100, 100, 100, 255]));
+        assert_eq!(rgba.get_pixel(0, 0), &Rgba([0, 0, 0, 0]));
+        assert_eq!(rgba.get_pixel(20, 20), &Rgba([0, 0, 0, 255]));
+        assert_eq!(rgba.get_pixel(40, 40), &Rgba([100, 100, 100, 255]));
     }
 
     #[test]
     fn test_apply_grid_overlay() {
         let img =
-            DynamicImage::ImageRgba8(RgbaImage::from_pixel(200, 200, image::Rgba([0, 0, 0, 255])));
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(200, 200, Rgba([0, 0, 0, 255])));
         let with_grid = apply_grid_overlay(img, 50);
         let rgba = with_grid.into_rgba8();
 
         // Pixel at (50, 50) is crosshair center
-        assert_eq!(rgba.get_pixel(50, 50), &image::Rgba([255, 70, 70, 220]));
+        assert_eq!(rgba.get_pixel(50, 50), &Rgba([255, 70, 70, 220]));
         // Label starts at (52, 52), background is dark alpha blend, character pixels are white
-        assert_ne!(rgba.get_pixel(53, 53), &image::Rgba([0, 0, 0, 255]));
+        assert_ne!(rgba.get_pixel(53, 53), &Rgba([0, 0, 0, 255]));
         // Step below 10 is ignored
         let orig =
-            DynamicImage::ImageRgba8(RgbaImage::from_pixel(50, 50, image::Rgba([1, 2, 3, 255])));
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(50, 50, Rgba([1, 2, 3, 255])));
         let unchanged = apply_grid_overlay(orig.clone(), 5);
         assert_eq!(orig.into_rgba8(), unchanged.into_rgba8());
     }
@@ -1303,7 +1303,7 @@ mod tests {
         let img1 = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
             100,
             100,
-            image::Rgba([128, 128, 128, 255]),
+            Rgba([128, 128, 128, 255]),
         ));
         let img2 = img1.clone();
         let diff = calculate_image_diff(&img1, &img2, 16);
@@ -1319,14 +1319,14 @@ mod tests {
         let img1 = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
             100,
             100,
-            image::Rgba([128, 128, 128, 255]),
+            Rgba([128, 128, 128, 255]),
         ));
-        let mut img2_rgba = RgbaImage::from_pixel(100, 100, image::Rgba([128, 128, 128, 255]));
+        let mut img2_rgba = RgbaImage::from_pixel(100, 100, Rgba([128, 128, 128, 255]));
 
         // Modify a 20x10 rectangle from (30, 40) to (49, 49)
         for y in 40..50 {
             for x in 30..50 {
-                img2_rgba.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
+                img2_rgba.put_pixel(x, y, Rgba([255, 0, 0, 255]));
             }
         }
         let img2 = DynamicImage::ImageRgba8(img2_rgba);
