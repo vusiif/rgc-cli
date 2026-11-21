@@ -1,32 +1,38 @@
 const BASE64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-/// Fast, dependency-free standard base64 encoding (RFC 4648).
+/// Fast, dependency-free standard base64 encoding (RFC 4648) with branchless chunked processing.
 pub fn base64_encode(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    let mut i = 0;
-    while i < input.len() {
-        let b0 = input[i];
-        let b1 = if i + 1 < input.len() { input[i + 1] } else { 0 };
-        let b2 = if i + 2 < input.len() { input[i + 2] } else { 0 };
+    let mut out = Vec::with_capacity(input.len().div_ceil(3) * 4);
+    let (chunks, remainder) = input.as_chunks::<3>();
 
-        out.push(BASE64_CHARS[(b0 >> 2) as usize] as char);
-        out.push(BASE64_CHARS[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-
-        if i + 1 < input.len() {
-            out.push(BASE64_CHARS[(((b1 & 0x0F) << 2) | (b2 >> 6)) as usize] as char);
-        } else {
-            out.push('=');
-        }
-
-        if i + 2 < input.len() {
-            out.push(BASE64_CHARS[(b2 & 0x3F) as usize] as char);
-        } else {
-            out.push('=');
-        }
-
-        i += 3;
+    for &[b0, b1, b2] in chunks {
+        out.push(BASE64_CHARS[(b0 >> 2) as usize]);
+        out.push(BASE64_CHARS[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize]);
+        out.push(BASE64_CHARS[(((b1 & 0x0F) << 2) | (b2 >> 6)) as usize]);
+        out.push(BASE64_CHARS[(b2 & 0x3F) as usize]);
     }
-    out
+
+    match remainder.len() {
+        1 => {
+            let b0 = remainder[0];
+            out.push(BASE64_CHARS[(b0 >> 2) as usize]);
+            out.push(BASE64_CHARS[((b0 & 0x03) << 4) as usize]);
+            out.push(b'=');
+            out.push(b'=');
+        }
+        2 => {
+            let b0 = remainder[0];
+            let b1 = remainder[1];
+            out.push(BASE64_CHARS[(b0 >> 2) as usize]);
+            out.push(BASE64_CHARS[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize]);
+            out.push(BASE64_CHARS[((b1 & 0x0F) << 2) as usize]);
+            out.push(b'=');
+        }
+        _ => {}
+    }
+
+    // BASE64_CHARS and '=' are guaranteed ASCII, so `out` is valid UTF-8.
+    String::from_utf8(out).unwrap_or_default()
 }
 
 /// Fast, dependency-free standard base64 decoding (RFC 4648).

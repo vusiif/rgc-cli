@@ -380,9 +380,26 @@ pub fn run_mcp_loop(reader: impl BufRead, writer: impl Write + Send) -> std::io:
             }
         });
 
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
+        let mut reader = reader;
+        let mut line_buf = String::with_capacity(4096);
+        loop {
+            line_buf.clear();
+            match reader.read_line(&mut line_buf) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let line = line_buf.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    if let Some(response_json) = handle_mcp_message(line) {
+                        if let Ok(mut w) = writer_mutex.lock() {
+                            if writeln!(w, "{response_json}").is_err() || w.flush().is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::UnexpectedEof
                         || e.kind() == std::io::ErrorKind::BrokenPipe
@@ -391,18 +408,6 @@ pub fn run_mcp_loop(reader: impl BufRead, writer: impl Write + Send) -> std::io:
                     }
                     error!("Error reading line from MCP stdin: {e}");
                     break;
-                }
-            };
-
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            if let Some(response_json) = handle_mcp_message(&line) {
-                if let Ok(mut w) = writer_mutex.lock() {
-                    if writeln!(w, "{response_json}").is_err() || w.flush().is_err() {
-                        break;
-                    }
                 }
             }
         }

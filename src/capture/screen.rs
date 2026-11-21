@@ -146,12 +146,16 @@ pub fn capture_screen_with_details(
             });
         }
 
-        debug!(
-            "Cropping image to physical region: x={}, y={}, w={}, h={}",
-            x, y, w, h
-        );
-        let cropped = image::imageops::crop_imm(&raw_image, x, y, w, h).to_image();
-        (DynamicImage::ImageRgba8(cropped), (x, y))
+        if x == 0 && y == 0 && w == actual_w && h == actual_h {
+            (DynamicImage::ImageRgba8(raw_image), (0, 0))
+        } else {
+            debug!(
+                "Cropping image to physical region: x={}, y={}, w={}, h={}",
+                x, y, w, h
+            );
+            let cropped = image::imageops::crop_imm(&raw_image, x, y, w, h).to_image();
+            (DynamicImage::ImageRgba8(cropped), (x, y))
+        }
     } else {
         (DynamicImage::ImageRgba8(raw_image), (0, 0))
     };

@@ -151,7 +151,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
             })
         };
 
-        let (mut frame_img, scale_factor, crop_offset, origin) = match captured {
+        let (frame_img, scale_factor, crop_offset, origin) = match captured {
             Ok(c) => c,
             Err(e) => {
                 return ToolCallResult {
@@ -163,6 +163,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
             }
         };
 
+        let mut rgba = frame_img.into_rgba8();
         if cursor_flag || highlight_cursor_flag {
             let global_cursor = capture::get_global_cursor_position();
             if let Some(cursor_info) = capture::resolve_cursor_on_canvas(
@@ -170,10 +171,10 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
                 origin.unwrap_or((0, 0)),
                 scale_factor,
                 crop_offset,
-                (frame_img.width(), frame_img.height()),
+                (rgba.width(), rgba.height()),
             ) {
-                frame_img = transform::draw_cursor_overlay(
-                    frame_img,
+                transform::draw_cursor_overlay_in_place(
+                    &mut rgba,
                     cursor_info.x,
                     cursor_info.y,
                     highlight_cursor_flag,
@@ -181,7 +182,11 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
             }
         }
 
-        frame_img = output::apply_image_transforms(frame_img, scale, max_dimension);
+        let frame_img = output::apply_image_transforms(
+            image::DynamicImage::ImageRgba8(rgba),
+            scale,
+            max_dimension,
+        );
         frames.push(frame_img);
 
         let elapsed = frame_start.elapsed();
@@ -203,7 +208,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let width = frames[0].width();
     let height = frames[0].height();
 
-    // Encode to animated GIF in memory
+    // Encode to animated GIF in memory using zero-copy frame buffer consumption
     let mut gif_bytes = Vec::new();
     {
         use image::codecs::gif::{GifEncoder, Repeat};
@@ -214,8 +219,8 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         let delay_ms = (1000 / fps.max(1)).max(10);
         let delay = Delay::from_numer_denom_ms(delay_ms, 1);
 
-        for frame in &frames {
-            let rgba = frame.to_rgba8();
+        for frame in frames {
+            let rgba = frame.into_rgba8();
             let gif_frame = Frame::from_parts(rgba, 0, 0, delay);
             if let Err(e) = encoder.encode_frame(gif_frame) {
                 return ToolCallResult {

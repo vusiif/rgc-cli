@@ -53,38 +53,42 @@ pub fn get_window_infos() -> Result<Vec<WindowInfo>, CaptureError> {
 /// 1. If query is numeric, attempts exact match against window ID.
 /// 2. Exact case-insensitive match on window title or application name.
 /// 3. Substring case-insensitive match on window title or application name (prioritizing non-minimized windows).
+///
+/// Single-pass implementation caches titles/app names to minimize Win32 IPC system calls.
 pub fn find_window<'a>(windows: &'a [Window], query: &str) -> Result<&'a Window, CaptureError> {
     let query_trimmed = query.trim();
+    let numeric_target_id = query_trimmed.parse::<u32>().ok();
+    let query_lower = query_trimmed.to_lowercase();
 
-    // 1. If numeric, first check if any window has this exact ID
-    if let Ok(target_id) = query_trimmed.parse::<u32>() {
-        for w in windows {
+    let mut exact_match = None;
+    let mut matching_windows = Vec::new();
+
+    for w in windows {
+        // Fast numeric ID match if query was an integer
+        if let Some(target_id) = numeric_target_id {
             if let Ok(id) = w.id() {
                 if id == target_id {
                     return Ok(w);
                 }
             }
         }
-    }
 
-    // 2. Exact match on title or app_name (case-insensitive)
-    let query_lower = query_trimmed.to_lowercase();
-    for w in windows {
+        // Cache title and app_name in single pass to avoid redundant Win32 GetWindowTextW IPC calls
         let title = w.title().unwrap_or_default().to_lowercase();
         let app = w.app_name().unwrap_or_default().to_lowercase();
-        if title == query_lower || app == query_lower {
-            return Ok(w);
+
+        if exact_match.is_none() && (title == query_lower || app == query_lower) {
+            exact_match = Some(w);
+            continue;
         }
-    }
 
-    // 3. Substring match on title or app_name (case-insensitive)
-    let mut matching_windows = Vec::new();
-    for w in windows {
-        let title = w.title().unwrap_or_default().to_lowercase();
-        let app = w.app_name().unwrap_or_default().to_lowercase();
         if title.contains(&query_lower) || app.contains(&query_lower) {
             matching_windows.push(w);
         }
+    }
+
+    if let Some(exact) = exact_match {
+        return Ok(exact);
     }
 
     // Prioritize non-minimized window if multiple matched

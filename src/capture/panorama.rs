@@ -80,16 +80,38 @@ pub fn capture_all_monitors_with_details(
             .monitor
             .capture_image()
             .map_err(CaptureError::CaptureFailed)?;
-        let rel_x = (item.x - min_x) as i64;
-        let rel_y = (item.y - min_y) as i64;
-        image::imageops::overlay(&mut canvas, &raw, rel_x, rel_y);
+        let rel_x = (item.x - min_x) as usize;
+        let rel_y = (item.y - min_y) as usize;
+        let rw = raw.width() as usize;
+        let rh = raw.height() as usize;
+        let cw = canvas.width() as usize;
+        let ch = canvas.height() as usize;
+
+        let copy_w = rw.min(cw.saturating_sub(rel_x));
+        let copy_h = rh.min(ch.saturating_sub(rel_y));
+
+        let raw_slice = raw.as_raw();
+        let canvas_slice = canvas.as_mut();
+
+        for row in 0..copy_h {
+            let src_start = row * rw * 4;
+            let src_end = src_start + copy_w * 4;
+            let dst_start = ((rel_y + row) * cw + rel_x) * 4;
+            let dst_end = dst_start + copy_w * 4;
+            canvas_slice[dst_start..dst_end].copy_from_slice(&raw_slice[src_start..src_end]);
+        }
     }
 
     let (image, crop_offset) = if let Some(reg) = region {
         let (crop_x, crop_y, crop_w, crop_h) =
             resolve_crop_region(reg, coords, primary_scale, total_w, total_h)?;
-        let cropped = image::imageops::crop_imm(&canvas, crop_x, crop_y, crop_w, crop_h).to_image();
-        (DynamicImage::ImageRgba8(cropped), (crop_x, crop_y))
+        if crop_x == 0 && crop_y == 0 && crop_w == total_w && crop_h == total_h {
+            (DynamicImage::ImageRgba8(canvas), (0, 0))
+        } else {
+            let cropped =
+                image::imageops::crop_imm(&canvas, crop_x, crop_y, crop_w, crop_h).to_image();
+            (DynamicImage::ImageRgba8(cropped), (crop_x, crop_y))
+        }
     } else {
         (DynamicImage::ImageRgba8(canvas), (0, 0))
     };

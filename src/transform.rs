@@ -97,18 +97,22 @@ pub fn apply_redaction(
 
     match effect {
         MaskEffect::Transparent => {
-            // Set Alpha to 0 (completely transparent hole)
+            let stride = (img_w as usize) * 4;
+            let row_len = ((x1 - x0) as usize) * 4;
+            let raw = img.as_mut();
             for py in y0..y1 {
-                for px in x0..x1 {
-                    img.put_pixel(px, py, image::Rgba([0, 0, 0, 0]));
-                }
+                let off = (py as usize) * stride + (x0 as usize) * 4;
+                raw[off..off + row_len].fill(0);
             }
         }
         MaskEffect::Blackout => {
-            // Set RGB to 0, Alpha to 255 (solid black box)
+            let stride = (img_w as usize) * 4;
+            let row_len = ((x1 - x0) as usize) * 4;
+            let raw = img.as_mut();
             for py in y0..y1 {
-                for px in x0..x1 {
-                    img.put_pixel(px, py, image::Rgba([0, 0, 0, 255]));
+                let off = (py as usize) * stride + (x0 as usize) * 4;
+                for px in raw[off..off + row_len].as_chunks_mut::<4>().0 {
+                    *px = [0, 0, 0, 255];
                 }
             }
         }
@@ -441,12 +445,13 @@ pub fn calculate_image_diff(
             let c_row = &curr_raw[row_offset..row_offset + stride];
             let r_row = &ref_raw[row_offset..row_offset + stride];
 
+            if c_row == r_row {
+                continue;
+            }
+
             for x in 0..cw {
                 let px = (x as usize) * 4;
-                let is_diff = c_row[px].abs_diff(r_row[px]) > threshold
-                    || c_row[px + 1].abs_diff(r_row[px + 1]) > threshold
-                    || c_row[px + 2].abs_diff(r_row[px + 2]) > threshold
-                    || c_row[px + 3].abs_diff(r_row[px + 3]) > threshold;
+                let is_diff = (0..4).any(|c| c_row[px + c].abs_diff(r_row[px + c]) > threshold);
 
                 if is_diff {
                     changed_pixels += 1;
@@ -463,10 +468,7 @@ pub fn calculate_image_diff(
                 let is_diff = if x < rw && y < rh {
                     let cp = curr_cow.get_pixel(x, y);
                     let rp = ref_cow.get_pixel(x, y);
-                    cp[0].abs_diff(rp[0]) > threshold
-                        || cp[1].abs_diff(rp[1]) > threshold
-                        || cp[2].abs_diff(rp[2]) > threshold
-                        || cp[3].abs_diff(rp[3]) > threshold
+                    (0..4).any(|c| cp[c].abs_diff(rp[c]) > threshold)
                 } else {
                     true
                 };

@@ -242,13 +242,16 @@ pub fn infer_format(path: Option<&Path>, explicit_format: Option<ImageFormat>) -
     ImageFormat::Png
 }
 
-/// Copy the captured image directly into the system clipboard.
+/// Copy the captured image directly into the system clipboard with zero-copy RGBA borrowing.
 pub fn copy_to_clipboard(image: &DynamicImage) -> Result<(), OutputError> {
-    debug!("Converting image to RGBA8 for system clipboard");
-    let rgba = image.to_rgba8();
-    let width = rgba.width() as usize;
-    let height = rgba.height() as usize;
-    let raw_bytes = rgba.into_raw();
+    debug!("Borrowing or converting image to RGBA8 for system clipboard");
+    let cow = borrow_or_convert_rgba8(image);
+    let width = cow.width() as usize;
+    let height = cow.height() as usize;
+    let bytes: std::borrow::Cow<[u8]> = match &cow {
+        std::borrow::Cow::Borrowed(rgba) => std::borrow::Cow::Borrowed(rgba.as_raw().as_slice()),
+        std::borrow::Cow::Owned(rgba) => std::borrow::Cow::Owned(rgba.clone().into_raw()),
+    };
 
     let mut clipboard =
         arboard::Clipboard::new().map_err(|e| OutputError::ClipboardFailed(e.to_string()))?;
@@ -256,7 +259,7 @@ pub fn copy_to_clipboard(image: &DynamicImage) -> Result<(), OutputError> {
     let img_data = arboard::ImageData {
         width,
         height,
-        bytes: raw_bytes.into(),
+        bytes,
     };
 
     clipboard
