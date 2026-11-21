@@ -24,6 +24,25 @@ pub fn json_tool_result<T: serde::Serialize>(val: &T) -> ToolCallResult {
     }
 }
 
+fn parse_markers<T>(
+    val: Option<&serde_json::Value>,
+    parser: fn(&str) -> Result<T, String>,
+) -> Result<Vec<T>, String> {
+    let mut out = Vec::new();
+    if let Some(v) = val {
+        if let Some(s) = v.as_str() {
+            out.push(parser(s)?);
+        } else if let Some(arr) = v.as_array() {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    out.push(parser(s)?);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
@@ -717,25 +736,22 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         (image.width(), image.height()),
     );
 
-    let image = if cursor_flag || highlight_cursor_flag {
+    let mut rgba = image.into_rgba8();
+    if (cursor_flag || highlight_cursor_flag) && cursor_info.is_some() {
         if let Some(ref c) = cursor_info {
-            transform::draw_cursor_overlay(image, c.x, c.y, highlight_cursor_flag)
-        } else {
-            image
+            transform::draw_cursor_overlay_in_place(&mut rgba, c.x, c.y, highlight_cursor_flag);
         }
-    } else {
-        image
-    };
+    }
 
-    let image = if !manual_masks.is_empty() || !window_masks.is_empty() {
+    if !manual_masks.is_empty() || !window_masks.is_empty() {
         let windows = if !window_masks.is_empty() {
             capture::get_windows().ok()
         } else {
             None
         };
         let redactions = capture::build_redactions(
-            image.width(),
-            image.height(),
+            rgba.width(),
+            rgba.height(),
             scale_factor,
             crop_offset,
             monitor_origin,
@@ -744,12 +760,13 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
             &window_masks,
             windows.as_deref(),
         );
-        output::apply_redactions(image, &redactions)
-    } else {
-        image
-    };
+        for &(x, y, w, h, effect) in &redactions {
+            transform::apply_redaction(&mut rgba, x, y, w, h, effect);
+        }
+    }
 
-    let mut image = output::apply_image_transforms(image, scale, max_dimension);
+    let mut image =
+        output::apply_image_transforms(image::DynamicImage::ImageRgba8(rgba), scale, max_dimension);
 
     let mut diff_summary = None;
     if let Some(ref ref_image) = preloaded_diff_ref {
@@ -759,16 +776,20 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
                 image = output::crop_to_diff_bbox(image, bbox, 8);
             }
         }
+        diff_summary = serde_json::to_string_pretty(&diff).ok();
+        let mut rgba = image.into_rgba8();
         if highlight_diff {
             if let Some(ref bbox) = diff.bbox {
-                image = output::highlight_diff_bbox(image, bbox, 2, None);
+                output::highlight_diff_bbox_in_place(&mut rgba, bbox, 2, None);
             }
         }
-        diff_summary = serde_json::to_string_pretty(&diff).ok();
+        image = image::DynamicImage::ImageRgba8(rgba);
     }
 
+    let mut rgba = image.into_rgba8();
+
     if let Some(grid_step) = grid {
-        image = output::apply_grid_overlay(image, grid_step);
+        output::apply_grid_overlay_in_place(&mut rgba, grid_step);
     }
 
     if timestamp || tag.is_some() {
@@ -777,8 +798,8 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         } else {
             None
         };
-        image = output::apply_watermark_and_tag(
-            image,
+        output::apply_watermark_and_tag_in_place(
+            &mut rgba,
             ts_str.as_deref(),
             tag,
             output::WatermarkPosition::BottomRight,
@@ -786,75 +807,41 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
     }
 
     let detected_elements = if som_flag {
-        let elements = crate::som::detect_ui_elements(&image, som_threshold, som_max_elements);
-        image = crate::som::draw_som_overlay(image, &elements);
+        let elements =
+            crate::som::detect_ui_elements_from_rgba(&rgba, som_threshold, som_max_elements);
+        crate::som::draw_som_overlay_in_place(&mut rgba, &elements);
         Some(elements)
     } else {
         None
     };
 
     // Action overlays: click ripples and drag trajectories
-    let mut parsed_clicks = Vec::new();
-    if let Some(clicks_val) = arguments.get("clickAt") {
-        if let Some(s) = clicks_val.as_str() {
-            match crate::action::parse_click_marker(s) {
-                Ok(m) => parsed_clicks.push(m),
-                Err(e) => {
-                    return ToolCallResult {
-                        content: vec![ToolContent::Text { text: e }],
-                        is_error: true,
-                    };
+    let parsed_clicks =
+        match parse_markers(arguments.get("clickAt"), crate::action::parse_click_marker) {
+            Ok(c) => c,
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text { text: e }],
+                    is_error: true,
                 }
             }
-        } else if let Some(arr) = clicks_val.as_array() {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    match crate::action::parse_click_marker(s) {
-                        Ok(m) => parsed_clicks.push(m),
-                        Err(e) => {
-                            return ToolCallResult {
-                                content: vec![ToolContent::Text { text: e }],
-                                is_error: true,
-                            };
-                        }
-                    }
-                }
+        };
+    let parsed_drags = match parse_markers(arguments.get("drag"), crate::action::parse_drag_marker)
+    {
+        Ok(d) => d,
+        Err(e) => {
+            return ToolCallResult {
+                content: vec![ToolContent::Text { text: e }],
+                is_error: true,
             }
         }
-    }
-
-    let mut parsed_drags = Vec::new();
-    if let Some(drags_val) = arguments.get("drag") {
-        if let Some(s) = drags_val.as_str() {
-            match crate::action::parse_drag_marker(s) {
-                Ok(m) => parsed_drags.push(m),
-                Err(e) => {
-                    return ToolCallResult {
-                        content: vec![ToolContent::Text { text: e }],
-                        is_error: true,
-                    };
-                }
-            }
-        } else if let Some(arr) = drags_val.as_array() {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    match crate::action::parse_drag_marker(s) {
-                        Ok(m) => parsed_drags.push(m),
-                        Err(e) => {
-                            return ToolCallResult {
-                                content: vec![ToolContent::Text { text: e }],
-                                is_error: true,
-                            };
-                        }
-                    }
-                }
-            }
-        }
-    }
+    };
 
     if !parsed_clicks.is_empty() || !parsed_drags.is_empty() {
-        image = crate::action::draw_action_overlays(image, &parsed_clicks, &parsed_drags);
+        crate::action::draw_action_overlays_in_place(&mut rgba, &parsed_clicks, &parsed_drags);
     }
+
+    let image = image::DynamicImage::ImageRgba8(rgba);
 
     let mut content = Vec::new();
 

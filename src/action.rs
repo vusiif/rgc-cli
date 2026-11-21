@@ -9,7 +9,7 @@
 use image::{DynamicImage, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 
-use crate::transform::{blend_pixel, draw_label_3x5, DiffBBox};
+use crate::transform::{blend_pixel, borrow_or_convert_rgba8, draw_label_3x5, DiffBBox};
 
 /// Visual click marker targeting a coordinate on the screen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,6 +365,21 @@ pub fn draw_drag_marker(img: &mut RgbaImage, marker: &DragMarker) {
     }
 }
 
+/// Composite click markers and drag trajectories onto an RGBA canvas in-place.
+pub fn draw_action_overlays_in_place(
+    rgba: &mut RgbaImage,
+    clicks: &[ClickMarker],
+    drags: &[DragMarker],
+) {
+    for drag in drags {
+        draw_drag_marker(rgba, drag);
+    }
+
+    for click in clicks {
+        draw_click_marker(rgba, click);
+    }
+}
+
 /// Composite click markers and drag trajectories onto a dynamic image.
 pub fn draw_action_overlays(
     image: DynamicImage,
@@ -376,15 +391,7 @@ pub fn draw_action_overlays(
     }
 
     let mut rgba = image.into_rgba8();
-
-    for drag in drags {
-        draw_drag_marker(&mut rgba, drag);
-    }
-
-    for click in clicks {
-        draw_click_marker(&mut rgba, click);
-    }
-
+    draw_action_overlays_in_place(&mut rgba, clicks, drags);
     DynamicImage::ImageRgba8(rgba)
 }
 
@@ -397,13 +404,13 @@ pub fn verify_action_change(
     radius: u32,
     threshold: u8,
 ) -> ActionVerificationResult {
-    let b_rgba = before.to_rgba8();
-    let a_rgba = after.to_rgba8();
+    let b_cow = borrow_or_convert_rgba8(before);
+    let a_cow = borrow_or_convert_rgba8(after);
 
-    let bw = b_rgba.width();
-    let bh = b_rgba.height();
-    let aw = a_rgba.width();
-    let ah = a_rgba.height();
+    let bw = b_cow.width();
+    let bh = b_cow.height();
+    let aw = a_cow.width();
+    let ah = a_cow.height();
 
     let w = bw.min(aw);
     let h = bh.min(ah);
@@ -439,8 +446,8 @@ pub fn verify_action_change(
 
             total_roi_pixels += 1;
 
-            let bp = b_rgba.get_pixel(x, y);
-            let ap = a_rgba.get_pixel(x, y);
+            let bp = b_cow.get_pixel(x, y);
+            let ap = a_cow.get_pixel(x, y);
 
             let is_diff = bp[0].abs_diff(ap[0]) > threshold
                 || bp[1].abs_diff(ap[1]) > threshold

@@ -27,6 +27,19 @@ pub struct DiffResult {
     pub bbox: Option<DiffBBox>,
 }
 
+/// Borrows `DynamicImage` as `&RgbaImage` with zero allocation if already RGBA8,
+/// or converts to owned `RgbaImage` if in a different color space.
+#[inline]
+pub fn borrow_or_convert_rgba8<'a>(
+    image: &'a DynamicImage,
+) -> std::borrow::Cow<'a, image::RgbaImage> {
+    if let Some(rgba) = image.as_rgba8() {
+        std::borrow::Cow::Borrowed(rgba)
+    } else {
+        std::borrow::Cow::Owned(image.to_rgba8())
+    }
+}
+
 /// Applies scaling factor or max dimension constraint to captured image.
 pub fn apply_image_transforms(
     image: DynamicImage,
@@ -110,26 +123,21 @@ pub fn apply_redaction(
                     let count = (b_w * b_h) as u64;
 
                     // Compute average RGBA across block
-                    let mut r_sum = 0u64;
-                    let mut g_sum = 0u64;
-                    let mut b_sum = 0u64;
-                    let mut a_sum = 0u64;
-
+                    let mut sum = [0u64; 4];
                     for py in by..(by + b_h) {
                         for px in bx..(bx + b_w) {
                             let p = img.get_pixel(px, py);
-                            r_sum += p[0] as u64;
-                            g_sum += p[1] as u64;
-                            b_sum += p[2] as u64;
-                            a_sum += p[3] as u64;
+                            for c in 0..4 {
+                                sum[c] += p[c] as u64;
+                            }
                         }
                     }
 
                     let avg_pixel = image::Rgba([
-                        (r_sum / count) as u8,
-                        (g_sum / count) as u8,
-                        (b_sum / count) as u8,
-                        (a_sum / count) as u8,
+                        (sum[0] / count) as u8,
+                        (sum[1] / count) as u8,
+                        (sum[2] / count) as u8,
+                        (sum[3] / count) as u8,
                     ]);
 
                     for py in by..(by + b_h) {
@@ -192,49 +200,33 @@ pub fn apply_redactions(
 }
 
 // 3x5 bitmap font for '0'..='9', ',', and '-' (used for visual grounding grid coordinates)
+#[rustfmt::skip]
 const FONT_3X5_DIGITS: [[u8; 5]; 10] = [
-    [0b111, 0b101, 0b101, 0b101, 0b111], // 0
-    [0b010, 0b110, 0b010, 0b010, 0b111], // 1
-    [0b111, 0b001, 0b111, 0b100, 0b111], // 2
-    [0b111, 0b001, 0b111, 0b001, 0b111], // 3
-    [0b101, 0b101, 0b111, 0b001, 0b001], // 4
-    [0b111, 0b100, 0b111, 0b001, 0b111], // 5
-    [0b111, 0b100, 0b111, 0b101, 0b111], // 6
-    [0b111, 0b001, 0b010, 0b010, 0b010], // 7
-    [0b111, 0b101, 0b111, 0b101, 0b111], // 8
-    [0b111, 0b101, 0b111, 0b001, 0b111], // 9
+    [0b111, 0b101, 0b101, 0b101, 0b111], [0b010, 0b110, 0b010, 0b010, 0b111], // 0, 1
+    [0b111, 0b001, 0b111, 0b100, 0b111], [0b111, 0b001, 0b111, 0b001, 0b111], // 2, 3
+    [0b101, 0b101, 0b111, 0b001, 0b001], [0b111, 0b100, 0b111, 0b001, 0b111], // 4, 5
+    [0b111, 0b100, 0b111, 0b101, 0b111], [0b111, 0b001, 0b010, 0b010, 0b010], // 6, 7
+    [0b111, 0b101, 0b111, 0b101, 0b111], [0b111, 0b101, 0b111, 0b001, 0b111], // 8, 9
+];
+
+#[rustfmt::skip]
+const FONT_3X5_LETTERS: [[u8; 5]; 26] = [
+    [0b010, 0b101, 0b111, 0b101, 0b101], [0b110, 0b101, 0b110, 0b101, 0b110], // A, B
+    [0b011, 0b100, 0b100, 0b100, 0b011], [0b110, 0b101, 0b101, 0b101, 0b110], // C, D
+    [0b111, 0b100, 0b110, 0b100, 0b111], [0b111, 0b100, 0b110, 0b100, 0b100], // E, F
+    [0b011, 0b100, 0b101, 0b101, 0b011], [0b101, 0b101, 0b111, 0b101, 0b101], // G, H
+    [0b111, 0b010, 0b010, 0b010, 0b111], [0b001, 0b001, 0b001, 0b101, 0b010], // I, J
+    [0b101, 0b110, 0b100, 0b110, 0b101], [0b100, 0b100, 0b100, 0b100, 0b111], // K, L
+    [0b101, 0b111, 0b101, 0b101, 0b101], [0b110, 0b101, 0b101, 0b101, 0b101], // M, N
+    [0b010, 0b101, 0b101, 0b101, 0b010], [0b110, 0b101, 0b110, 0b100, 0b100], // O, P
+    [0b010, 0b101, 0b101, 0b110, 0b011], [0b110, 0b101, 0b110, 0b101, 0b101], // Q, R
+    [0b011, 0b100, 0b010, 0b001, 0b110], [0b111, 0b010, 0b010, 0b010, 0b010], // S, T
+    [0b101, 0b101, 0b101, 0b101, 0b010], [0b101, 0b101, 0b101, 0b010, 0b010], // U, V
+    [0b101, 0b101, 0b101, 0b111, 0b101], [0b101, 0b101, 0b010, 0b101, 0b101], // W, X
+    [0b101, 0b101, 0b010, 0b010, 0b010], [0b111, 0b001, 0b010, 0b100, 0b111], // Y, Z
 ];
 const FONT_3X5_COMMA: [u8; 5] = [0b000, 0b000, 0b000, 0b010, 0b100];
 const FONT_3X5_MINUS: [u8; 5] = [0b000, 0b000, 0b111, 0b000, 0b000];
-
-const FONT_3X5_LETTERS: [[u8; 5]; 26] = [
-    [0b010, 0b101, 0b111, 0b101, 0b101], // A
-    [0b110, 0b101, 0b110, 0b101, 0b110], // B
-    [0b011, 0b100, 0b100, 0b100, 0b011], // C
-    [0b110, 0b101, 0b101, 0b101, 0b110], // D
-    [0b111, 0b100, 0b110, 0b100, 0b111], // E
-    [0b111, 0b100, 0b110, 0b100, 0b100], // F
-    [0b011, 0b100, 0b101, 0b101, 0b011], // G
-    [0b101, 0b101, 0b111, 0b101, 0b101], // H
-    [0b111, 0b010, 0b010, 0b010, 0b111], // I
-    [0b001, 0b001, 0b001, 0b101, 0b010], // J
-    [0b101, 0b110, 0b100, 0b110, 0b101], // K
-    [0b100, 0b100, 0b100, 0b100, 0b111], // L
-    [0b101, 0b111, 0b101, 0b101, 0b101], // M
-    [0b110, 0b101, 0b101, 0b101, 0b101], // N
-    [0b010, 0b101, 0b101, 0b101, 0b010], // O
-    [0b110, 0b101, 0b110, 0b100, 0b100], // P
-    [0b010, 0b101, 0b101, 0b110, 0b011], // Q
-    [0b110, 0b101, 0b110, 0b101, 0b101], // R
-    [0b011, 0b100, 0b010, 0b001, 0b110], // S
-    [0b111, 0b010, 0b010, 0b010, 0b010], // T
-    [0b101, 0b101, 0b101, 0b101, 0b010], // U
-    [0b101, 0b101, 0b101, 0b010, 0b010], // V
-    [0b101, 0b101, 0b101, 0b111, 0b101], // W
-    [0b101, 0b101, 0b010, 0b101, 0b101], // X
-    [0b101, 0b101, 0b010, 0b010, 0b010], // Y
-    [0b111, 0b001, 0b010, 0b100, 0b111], // Z
-];
 const FONT_3X5_SPACE: [u8; 5] = [0b000, 0b000, 0b000, 0b000, 0b000];
 const FONT_3X5_COLON: [u8; 5] = [0b000, 0b010, 0b000, 0b010, 0b000];
 const FONT_3X5_DOT: [u8; 5] = [0b000, 0b000, 0b000, 0b000, 0b010];
@@ -284,11 +276,8 @@ pub(crate) fn blend_pixel(img: &mut image::RgbaImage, x: u32, y: u32, src: image
         return;
     }
 
-    let out_r = ((src[0] as u32 * sa + dst[0] as u32 * da * inv_sa / 255) / out_a) as u8;
-    let out_g = ((src[1] as u32 * sa + dst[1] as u32 * da * inv_sa / 255) / out_a) as u8;
-    let out_b = ((src[2] as u32 * sa + dst[2] as u32 * da * inv_sa / 255) / out_a) as u8;
-
-    img.put_pixel(x, y, image::Rgba([out_r, out_g, out_b, out_a as u8]));
+    let c = |i: usize| ((src[i] as u32 * sa + dst[i] as u32 * da * inv_sa / 255) / out_a) as u8;
+    img.put_pixel(x, y, image::Rgba([c(0), c(1), c(2), out_a as u8]));
 }
 
 /// Draws coordinate label using 3x5 font with background padding for high contrast.
@@ -345,13 +334,12 @@ pub fn draw_label_3x5(
     }
 }
 
-/// Overlay visual grounding grid lines and coordinate anchors for AI agent localization.
-pub fn apply_grid_overlay(image: DynamicImage, step: u32) -> DynamicImage {
+/// In-place variant of visual grounding grid overlay.
+pub fn apply_grid_overlay_in_place(rgba: &mut image::RgbaImage, step: u32) {
     if step < 10 {
-        return image;
+        return;
     }
 
-    let mut rgba = image.into_rgba8();
     let w = rgba.width();
     let h = rgba.height();
 
@@ -364,7 +352,7 @@ pub fn apply_grid_overlay(image: DynamicImage, step: u32) -> DynamicImage {
     let mut x = step;
     while x < w {
         for y in 0..h {
-            blend_pixel(&mut rgba, x, y, grid_color);
+            blend_pixel(rgba, x, y, grid_color);
         }
         x += step;
     }
@@ -373,7 +361,7 @@ pub fn apply_grid_overlay(image: DynamicImage, step: u32) -> DynamicImage {
     let mut y = step;
     while y < h {
         for x_coord in 0..w {
-            blend_pixel(&mut rgba, x_coord, y, grid_color);
+            blend_pixel(rgba, x_coord, y, grid_color);
         }
         y += step;
     }
@@ -391,29 +379,39 @@ pub fn apply_grid_overlay(image: DynamicImage, step: u32) -> DynamicImage {
             }
 
             let label = format!("{ix},{iy}");
-            draw_label_3x5(&mut rgba, ix + 2, iy + 2, &label, fg_text, bg_text);
+            draw_label_3x5(rgba, ix + 2, iy + 2, &label, fg_text, bg_text);
 
             ix += step;
         }
         iy += step;
     }
+}
 
+/// Overlay visual grounding grid lines and coordinate anchors for AI agent localization.
+pub fn apply_grid_overlay(image: DynamicImage, step: u32) -> DynamicImage {
+    if step < 10 {
+        return image;
+    }
+
+    let mut rgba = image.into_rgba8();
+    apply_grid_overlay_in_place(&mut rgba, step);
     DynamicImage::ImageRgba8(rgba)
 }
 
 /// Compare current image against a reference image and calculate bounding box of differences.
+/// Optimizes performance via zero-copy borrowing and contiguous row comparisons.
 pub fn calculate_image_diff(
     current: &DynamicImage,
     reference: &DynamicImage,
     threshold: u8,
 ) -> DiffResult {
-    let curr_rgba = current.to_rgba8();
-    let ref_rgba = reference.to_rgba8();
+    let curr_cow = borrow_or_convert_rgba8(current);
+    let ref_cow = borrow_or_convert_rgba8(reference);
 
-    let cw = curr_rgba.width();
-    let ch = curr_rgba.height();
-    let rw = ref_rgba.width();
-    let rh = ref_rgba.height();
+    let cw = curr_cow.width();
+    let ch = curr_cow.height();
+    let rw = ref_cow.width();
+    let rh = ref_cow.height();
 
     let total_pixels = (cw as u64) * (ch as u64);
     if total_pixels == 0 {
@@ -433,32 +431,52 @@ pub fn calculate_image_diff(
     let mut min_y = u32::MAX;
     let mut max_y = 0u32;
 
-    for y in 0..ch {
-        for x in 0..cw {
-            let is_diff = if x < rw && y < rh {
-                let cp = curr_rgba.get_pixel(x, y);
-                let rp = ref_rgba.get_pixel(x, y);
-                cp[0].abs_diff(rp[0]) > threshold
-                    || cp[1].abs_diff(rp[1]) > threshold
-                    || cp[2].abs_diff(rp[2]) > threshold
-                    || cp[3].abs_diff(rp[3]) > threshold
-            } else {
-                true
-            };
+    if cw == rw && ch == rh {
+        let curr_raw = curr_cow.as_raw();
+        let ref_raw = ref_cow.as_raw();
+        let stride = (cw as usize) * 4;
 
-            if is_diff {
-                changed_pixels += 1;
-                if x < min_x {
-                    min_x = x;
+        for y in 0..ch {
+            let row_offset = (y as usize) * stride;
+            let c_row = &curr_raw[row_offset..row_offset + stride];
+            let r_row = &ref_raw[row_offset..row_offset + stride];
+
+            for x in 0..cw {
+                let px = (x as usize) * 4;
+                let is_diff = c_row[px].abs_diff(r_row[px]) > threshold
+                    || c_row[px + 1].abs_diff(r_row[px + 1]) > threshold
+                    || c_row[px + 2].abs_diff(r_row[px + 2]) > threshold
+                    || c_row[px + 3].abs_diff(r_row[px + 3]) > threshold;
+
+                if is_diff {
+                    changed_pixels += 1;
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
                 }
-                if x > max_x {
-                    max_x = x;
-                }
-                if y < min_y {
-                    min_y = y;
-                }
-                if y > max_y {
-                    max_y = y;
+            }
+        }
+    } else {
+        for y in 0..ch {
+            for x in 0..cw {
+                let is_diff = if x < rw && y < rh {
+                    let cp = curr_cow.get_pixel(x, y);
+                    let rp = ref_cow.get_pixel(x, y);
+                    cp[0].abs_diff(rp[0]) > threshold
+                        || cp[1].abs_diff(rp[1]) > threshold
+                        || cp[2].abs_diff(rp[2]) > threshold
+                        || cp[3].abs_diff(rp[3]) > threshold
+                } else {
+                    true
+                };
+
+                if is_diff {
+                    changed_pixels += 1;
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
                 }
             }
         }
@@ -511,14 +529,13 @@ pub fn crop_to_diff_bbox(image: DynamicImage, bbox: &DiffBBox, padding: u32) -> 
     image.crop_imm(px, py, pw, ph)
 }
 
-/// Draw a prominent bounding box around visual differences on the image.
-pub fn highlight_diff_bbox(
-    image: DynamicImage,
+/// Draw a prominent bounding box around visual differences on an RGBA image in-place.
+pub fn highlight_diff_bbox_in_place(
+    rgba: &mut image::RgbaImage,
     bbox: &DiffBBox,
     stroke_width: u32,
     box_color: Option<image::Rgba<u8>>,
-) -> DynamicImage {
-    let mut rgba = image.into_rgba8();
+) {
     let img_w = rgba.width();
     let img_h = rgba.height();
 
@@ -533,32 +550,28 @@ pub fn highlight_diff_bbox(
     let y1 = (bbox.y.saturating_add(bbox.height)).min(img_h);
 
     if x0 >= x1 || y0 >= y1 {
-        return DynamicImage::ImageRgba8(rgba);
+        return;
     }
 
-    // Top border
+    // Top and bottom borders
     for py in y0..(y0 + stroke).min(y1) {
         for px in x0..x1 {
             rgba.put_pixel(px, py, color);
         }
     }
-    // Bottom border
     let b_top = y1.saturating_sub(stroke).max(y0);
     for py in b_top..y1 {
         for px in x0..x1 {
             rgba.put_pixel(px, py, color);
         }
     }
-    // Left border
-    for px in x0..(x0 + stroke).min(x1) {
-        for py in y0..y1 {
+    // Left and right borders
+    let r_left = x1.saturating_sub(stroke).max(x0);
+    for py in y0..y1 {
+        for px in x0..(x0 + stroke).min(x1) {
             rgba.put_pixel(px, py, color);
         }
-    }
-    // Right border
-    let r_left = x1.saturating_sub(stroke).max(x0);
-    for px in r_left..x1 {
-        for py in y0..y1 {
+        for px in r_left..x1 {
             rgba.put_pixel(px, py, color);
         }
     }
@@ -566,8 +579,18 @@ pub fn highlight_diff_bbox(
     // Small label tag
     let label = format!("DIFF:{}x{}", bbox.width, bbox.height);
     let label_y = if y0 >= 10 { y0 - 9 } else { y0 + stroke + 1 };
-    draw_label_3x5(&mut rgba, x0, label_y, &label, label_fg, label_bg);
+    draw_label_3x5(rgba, x0, label_y, &label, label_fg, label_bg);
+}
 
+/// Draw a prominent bounding box around visual differences on the image.
+pub fn highlight_diff_bbox(
+    image: DynamicImage,
+    bbox: &DiffBBox,
+    stroke_width: u32,
+    box_color: Option<image::Rgba<u8>>,
+) -> DynamicImage {
+    let mut rgba = image.into_rgba8();
+    highlight_diff_bbox_in_place(&mut rgba, bbox, stroke_width, box_color);
     DynamicImage::ImageRgba8(rgba)
 }
 
@@ -581,30 +604,25 @@ pub enum WatermarkPosition {
     TopLeft,
 }
 
-/// Overlay timestamp and/or custom tag badge onto image.
-pub fn apply_watermark_and_tag(
-    image: DynamicImage,
+/// Overlay timestamp and/or custom tag badge onto RGBA image in-place.
+pub fn apply_watermark_and_tag_in_place(
+    rgba: &mut image::RgbaImage,
     timestamp: Option<&str>,
     tag: Option<&str>,
     position: WatermarkPosition,
-) -> DynamicImage {
+) {
     let mut parts = Vec::new();
-    if let Some(t) = timestamp {
-        if !t.is_empty() {
-            parts.push(t);
-        }
+    if let Some(t) = timestamp.filter(|s| !s.is_empty()) {
+        parts.push(t);
     }
-    if let Some(tg) = tag {
-        if !tg.is_empty() {
-            parts.push(tg);
-        }
+    if let Some(tg) = tag.filter(|s| !s.is_empty()) {
+        parts.push(tg);
     }
     if parts.is_empty() {
-        return image;
+        return;
     }
 
     let text = parts.join(" | ");
-    let mut rgba = image.into_rgba8();
     let img_w = rgba.width();
     let img_h = rgba.height();
 
@@ -613,7 +631,7 @@ pub fn apply_watermark_and_tag(
     let badge_h = 11; // 7px text + 4px padding
 
     if img_w < badge_w || img_h < badge_h {
-        return DynamicImage::ImageRgba8(rgba);
+        return;
     }
 
     let margin = 8u32;
@@ -630,20 +648,29 @@ pub fn apply_watermark_and_tag(
     let fg = image::Rgba([255, 255, 255, 255]);
     let bg = image::Rgba([0, 0, 0, 200]);
 
-    draw_label_3x5(&mut rgba, start_x, start_y, &text, fg, bg);
+    draw_label_3x5(rgba, start_x, start_y, &text, fg, bg);
+}
 
+/// Overlay timestamp and/or custom tag badge onto image.
+pub fn apply_watermark_and_tag(
+    image: DynamicImage,
+    timestamp: Option<&str>,
+    tag: Option<&str>,
+    position: WatermarkPosition,
+) -> DynamicImage {
+    let mut rgba = image.into_rgba8();
+    apply_watermark_and_tag_in_place(&mut rgba, timestamp, tag, position);
     DynamicImage::ImageRgba8(rgba)
 }
 
-/// Draw an overlaid mouse cursor arrow (with optional focus halo ring) onto the canvas.
+/// Draw an overlaid mouse cursor arrow (with optional focus halo ring) onto an RGBA canvas in-place.
 /// Uses pure Safe Rust, alpha-blends with the existing background, and clamps to canvas boundaries.
-pub fn draw_cursor_overlay(
-    image: DynamicImage,
+pub fn draw_cursor_overlay_in_place(
+    rgba: &mut image::RgbaImage,
     cursor_x: i32,
     cursor_y: i32,
     highlight: bool,
-) -> DynamicImage {
-    let mut rgba = image.into_rgba8();
+) {
     let width = rgba.width() as i32;
     let height = rgba.height() as i32;
 
@@ -699,22 +726,14 @@ pub fn draw_cursor_overlay(
     // 0 = transparent, 1 = black border (#000000), 2 = white interior (#FFFFFF)
     #[rustfmt::skip]
     const ARROW_PATTERN: [[u8; 11]; 17] = [
-        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        [1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0],
-        [1, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0],
-        [1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0],
-        [1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0],
-        [1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0],
-        [1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0],
-        [1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0],
-        [1, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1],
-        [1, 2, 2, 1, 2, 2, 1, 0, 0, 0, 0],
-        [1, 2, 1, 0, 1, 2, 2, 1, 0, 0, 0],
-        [1, 1, 0, 0, 1, 2, 2, 1, 0, 0, 0],
-        [1, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0],
-        [0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0],
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0], [1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0],
+        [1, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0], [1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0],
+        [1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0], [1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0],
+        [1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0], [1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0],
+        [1, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1], [1, 2, 2, 1, 2, 2, 1, 0, 0, 0, 0],
+        [1, 2, 1, 0, 1, 2, 2, 1, 0, 0, 0], [1, 1, 0, 0, 1, 2, 2, 1, 0, 0, 0],
+        [1, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0], [0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0],
         [0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0],
     ];
 
@@ -732,7 +751,18 @@ pub fn draw_cursor_overlay(
             }
         }
     }
+}
 
+/// Draw an overlaid mouse cursor arrow (with optional focus halo ring) onto the canvas.
+/// Uses pure Safe Rust, alpha-blends with the existing background, and clamps to canvas boundaries.
+pub fn draw_cursor_overlay(
+    image: DynamicImage,
+    cursor_x: i32,
+    cursor_y: i32,
+    highlight: bool,
+) -> DynamicImage {
+    let mut rgba = image.into_rgba8();
+    draw_cursor_overlay_in_place(&mut rgba, cursor_x, cursor_y, highlight);
     DynamicImage::ImageRgba8(rgba)
 }
 
@@ -817,9 +847,7 @@ mod tests {
             (0, 0, 10, 10, MaskEffect::Transparent),
             (20, 20, 10, 10, MaskEffect::Blackout),
         ];
-        let redacted = apply_redactions(img, &masks);
-        let rgba = redacted.into_rgba8();
-
+        let rgba = apply_redactions(img, &masks).into_rgba8();
         assert_eq!(rgba.get_pixel(0, 0), &image::Rgba([0, 0, 0, 0]));
         assert_eq!(rgba.get_pixel(20, 20), &image::Rgba([0, 0, 0, 255]));
         assert_eq!(rgba.get_pixel(40, 40), &image::Rgba([100, 100, 100, 255]));
@@ -938,18 +966,9 @@ mod tests {
 
     #[test]
     fn test_get_glyph_3x5_ascii() {
-        // Letters
-        assert!(get_glyph_3x5('A').is_some());
-        assert!(get_glyph_3x5('z').is_some());
-        // Digits
-        assert!(get_glyph_3x5('5').is_some());
-        // Symbols
-        assert!(get_glyph_3x5(':').is_some());
-        assert!(get_glyph_3x5('/').is_some());
-        assert!(get_glyph_3x5('|').is_some());
-        assert!(get_glyph_3x5('_').is_some());
-        assert!(get_glyph_3x5(' ').is_some());
-        // Unknown symbol returns None
+        for ch in ['A', 'z', '5', ':', '/', '|', '_', ' '] {
+            assert!(get_glyph_3x5(ch).is_some());
+        }
         assert!(get_glyph_3x5('~').is_none());
     }
 

@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use image::{DynamicImage, GenericImageView, Rgba};
+use image::{DynamicImage, Rgba};
 
 use crate::api::UiElement;
 
@@ -14,18 +14,19 @@ const PALETTE: [Rgba<u8>; 6] = [
 ];
 
 /// Detect interactive UI elements (buttons, inputs, cards) using edge gradient analysis
-/// and morphological clustering.
-pub fn detect_ui_elements(
-    image: &DynamicImage,
+/// and morphological clustering directly from an RGBA image.
+/// Uses a 3-row sliding cache to achieve O(1) row memory overhead and maximum L1/L2 cache locality.
+pub fn detect_ui_elements_from_rgba(
+    rgba: &image::RgbaImage,
     threshold: u8,
     max_elements: usize,
 ) -> Vec<UiElement> {
-    let (width, height) = image.dimensions();
+    let width = rgba.width();
+    let height = rgba.height();
     if width < 30 || height < 20 || max_elements == 0 {
         return Vec::new();
     }
 
-    let rgba = image.to_rgba8();
     let grad_threshold = (threshold as u32).max(5) * 2;
 
     // Block size for spatial clustering: 4px for standard, 8px for 4K
@@ -37,34 +38,41 @@ pub fn detect_ui_elements(
     let grid_w = width.div_ceil(block_size);
     let grid_h = height.div_ceil(block_size);
 
-    // Compute luminance map
-    // Y = (299*R + 587*G + 114*B) / 1000
-    let mut lum = vec![0u8; (width * height) as usize];
-    for y in 0..height {
-        for x in 0..width {
-            let px = rgba.get_pixel(x, y);
-            let y_val =
-                ((px[0] as u32 * 299 + px[1] as u32 * 587 + px[2] as u32 * 114) / 1000) as u8;
-            lum[(y * width + x) as usize] = y_val;
-        }
-    }
-
-    // Step 1: Detect edge pixels and aggregate into block occupancy grid
+    // Step 1: Detect edge pixels using 3-row sliding luminance cache
     let mut block_edges = vec![0u16; (grid_w * grid_h) as usize];
 
+    let w = width as usize;
+    let raw_bytes = rgba.as_raw();
+    let stride = w * 4;
+
+    let fill_lum_row = |row: u32, buf: &mut [u8]| {
+        let offset = (row as usize) * stride;
+        let slice = &raw_bytes[offset..offset + stride];
+        for (x, out_val) in buf.iter_mut().enumerate().take(w) {
+            let px = x * 4;
+            let r = slice[px] as u32;
+            let g = slice[px + 1] as u32;
+            let b = slice[px + 2] as u32;
+            *out_val = ((r * 299 + g * 587 + b * 114) / 1000) as u8;
+        }
+    };
+
+    let mut prev_lum = vec![0u8; w];
+    let mut curr_lum = vec![0u8; w];
+    let mut next_lum = vec![0u8; w];
+
+    fill_lum_row(0, &mut prev_lum);
+    fill_lum_row(1, &mut curr_lum);
+
     for y in 1..height.saturating_sub(1) {
-        let row_idx = y * width;
-        let prev_row = (y - 1) * width;
-        let next_row = (y + 1) * width;
+        fill_lum_row(y + 1, &mut next_lum);
         let by = y / block_size;
         let by_stride = (by * grid_w) as usize;
 
         for x in 1..width.saturating_sub(1) {
-            let dx = (lum[(row_idx + x + 1) as usize] as i32
-                - lum[(row_idx + x - 1) as usize] as i32)
-                .unsigned_abs();
-            let dy = (lum[(next_row + x) as usize] as i32 - lum[(prev_row + x) as usize] as i32)
-                .unsigned_abs();
+            let xi = x as usize;
+            let dx = (curr_lum[xi + 1] as i32 - curr_lum[xi - 1] as i32).unsigned_abs();
+            let dy = (next_lum[xi] as i32 - prev_lum[xi] as i32).unsigned_abs();
 
             if dx + dy >= grad_threshold {
                 let bx = x / block_size;
@@ -72,6 +80,9 @@ pub fn detect_ui_elements(
                     block_edges[by_stride + bx as usize].saturating_add(1);
             }
         }
+
+        std::mem::swap(&mut prev_lum, &mut curr_lum);
+        std::mem::swap(&mut curr_lum, &mut next_lum);
     }
 
     // Step 2: Binary block mask with threshold
@@ -231,13 +242,23 @@ pub fn detect_ui_elements(
     elements
 }
 
-/// Render high-contrast Set-of-Mark (SoM) visual bounding boxes and numbered badges onto the image.
-pub fn draw_som_overlay(image: DynamicImage, elements: &[UiElement]) -> DynamicImage {
+/// Detect interactive UI elements (buttons, inputs, cards) using edge gradient analysis
+/// and morphological clustering on a dynamic image.
+pub fn detect_ui_elements(
+    image: &DynamicImage,
+    threshold: u8,
+    max_elements: usize,
+) -> Vec<UiElement> {
+    let cow = crate::transform::borrow_or_convert_rgba8(image);
+    detect_ui_elements_from_rgba(&cow, threshold, max_elements)
+}
+
+/// Render high-contrast Set-of-Mark (SoM) visual bounding boxes and numbered badges onto an RGBA canvas in-place.
+pub fn draw_som_overlay_in_place(rgba: &mut image::RgbaImage, elements: &[UiElement]) {
     if elements.is_empty() {
-        return image;
+        return;
     }
 
-    let mut rgba = image.into_rgba8();
     let img_w = rgba.width();
     let img_h = rgba.height();
 
@@ -270,9 +291,18 @@ pub fn draw_som_overlay(image: DynamicImage, elements: &[UiElement]) -> DynamicI
         let label_fg = Rgba([0, 0, 0, 255]); // Black text
         let label_bg = color; // Matching vivid badge background
 
-        crate::transform::draw_label_3x5(&mut rgba, x0, label_y, &badge_text, label_fg, label_bg);
+        crate::transform::draw_label_3x5(rgba, x0, label_y, &badge_text, label_fg, label_bg);
+    }
+}
+
+/// Render high-contrast Set-of-Mark (SoM) visual bounding boxes and numbered badges onto the image.
+pub fn draw_som_overlay(image: DynamicImage, elements: &[UiElement]) -> DynamicImage {
+    if elements.is_empty() {
+        return image;
     }
 
+    let mut rgba = image.into_rgba8();
+    draw_som_overlay_in_place(&mut rgba, elements);
     DynamicImage::ImageRgba8(rgba)
 }
 

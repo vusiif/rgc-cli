@@ -12,6 +12,7 @@ pub mod transform;
 
 use clap::Parser;
 use cli::Cli;
+use image::DynamicImage;
 use log::debug;
 use output::{
     ApiError, ApiResponse, CaptureResultJson, ErrorCode, ImageFormat, OutputDestination,
@@ -412,26 +413,23 @@ fn run(args: Cli) -> Result<(), ApiError> {
         (dynamic_image.width(), dynamic_image.height()),
     );
 
-    let dynamic_image = if args.cursor || args.highlight_cursor {
+    let mut rgba = dynamic_image.into_rgba8();
+    if (args.cursor || args.highlight_cursor) && cursor_info.is_some() {
         if let Some(ref c) = cursor_info {
-            transform::draw_cursor_overlay(dynamic_image, c.x, c.y, args.highlight_cursor)
-        } else {
-            dynamic_image
+            transform::draw_cursor_overlay_in_place(&mut rgba, c.x, c.y, args.highlight_cursor);
         }
-    } else {
-        dynamic_image
-    };
+    }
 
     // 4.2 Apply privacy redaction masks (transparent hole, blackout, pixelate, blur) before scaling
-    let dynamic_image = if !args.mask.is_empty() || !args.mask_window.is_empty() {
+    if !args.mask.is_empty() || !args.mask_window.is_empty() {
         let windows = if !args.mask_window.is_empty() {
             capture::get_windows().ok()
         } else {
             None
         };
         let redactions = capture::build_redactions(
-            dynamic_image.width(),
-            dynamic_image.height(),
+            rgba.width(),
+            rgba.height(),
             scale_factor,
             crop_offset,
             monitor_origin,
@@ -440,13 +438,16 @@ fn run(args: Cli) -> Result<(), ApiError> {
             &args.mask_window,
             windows.as_deref(),
         );
-        output::apply_redactions(dynamic_image, &redactions)
-    } else {
-        dynamic_image
-    };
+        for &(x, y, w, h, effect) in &redactions {
+            transform::apply_redaction(&mut rgba, x, y, w, h, effect);
+        }
+    }
 
-    let mut dynamic_image =
-        output::apply_image_transforms(dynamic_image, args.scale, args.max_dimension);
+    let mut dynamic_image = output::apply_image_transforms(
+        DynamicImage::ImageRgba8(rgba),
+        args.scale,
+        args.max_dimension,
+    );
 
     // 4.2 Handle diff calculation against reference image if requested
     let diff_result = if let Some(ref diff_path) = args.diff_with {
@@ -470,20 +471,24 @@ fn run(args: Cli) -> Result<(), ApiError> {
             }
         }
 
-        if args.highlight_diff {
-            if let Some(ref bbox) = diff.bbox {
-                dynamic_image = output::highlight_diff_bbox(dynamic_image, bbox, 2, None);
-            }
-        }
-
         Some(diff)
     } else {
         None
     };
 
+    let mut rgba = dynamic_image.into_rgba8();
+
+    if args.highlight_diff {
+        if let Some(ref diff) = diff_result {
+            if let Some(ref bbox) = diff.bbox {
+                output::highlight_diff_bbox_in_place(&mut rgba, bbox, 2, None);
+            }
+        }
+    }
+
     // 4.3 Apply visual grounding grid overlay if requested
     if let Some(grid_step) = args.grid {
-        dynamic_image = output::apply_grid_overlay(dynamic_image, grid_step);
+        output::apply_grid_overlay_in_place(&mut rgba, grid_step);
     }
 
     // 4.4 Apply timestamp and/or custom tag watermark badge if requested
@@ -493,8 +498,8 @@ fn run(args: Cli) -> Result<(), ApiError> {
         } else {
             None
         };
-        dynamic_image = output::apply_watermark_and_tag(
-            dynamic_image,
+        output::apply_watermark_and_tag_in_place(
+            &mut rgba,
             ts_str.as_deref(),
             args.tag.as_deref(),
             output::WatermarkPosition::BottomRight,
@@ -504,8 +509,8 @@ fn run(args: Cli) -> Result<(), ApiError> {
     // 4.5 Detect UI elements and apply Set-of-Mark (SoM) visual overlay if requested
     let detected_elements = if args.som {
         let elements =
-            som::detect_ui_elements(&dynamic_image, args.som_threshold, args.som_max_elements);
-        dynamic_image = som::draw_som_overlay(dynamic_image, &elements);
+            som::detect_ui_elements_from_rgba(&rgba, args.som_threshold, args.som_max_elements);
+        som::draw_som_overlay_in_place(&mut rgba, &elements);
         Some(elements)
     } else {
         None
@@ -559,8 +564,10 @@ fn run(args: Cli) -> Result<(), ApiError> {
         };
 
     if !clicks.is_empty() || !drags.is_empty() {
-        dynamic_image = action::draw_action_overlays(dynamic_image, &clicks, &drags);
+        action::draw_action_overlays_in_place(&mut rgba, &clicks, &drags);
     }
+
+    let dynamic_image = DynamicImage::ImageRgba8(rgba);
 
     let img_width = dynamic_image.width();
     let img_height = dynamic_image.height();
@@ -678,8 +685,9 @@ fn run_recording(
     while start_time.elapsed() < total_duration {
         let frame_start = Instant::now();
         let raw = capture_target(args)?;
-        let mut frame_img = raw.image;
+        let frame_img = raw.image;
 
+        let mut rgba = frame_img.into_rgba8();
         if args.cursor || args.highlight_cursor {
             let global_cursor = capture::get_global_cursor_position();
             let origin = raw.monitor_origin.unwrap_or((0, 0));
@@ -688,10 +696,10 @@ fn run_recording(
                 origin,
                 raw.scale_factor,
                 raw.crop_offset,
-                (frame_img.width(), frame_img.height()),
+                (rgba.width(), rgba.height()),
             ) {
-                frame_img = transform::draw_cursor_overlay(
-                    frame_img,
+                transform::draw_cursor_overlay_in_place(
+                    &mut rgba,
                     cursor_info.x,
                     cursor_info.y,
                     args.highlight_cursor,
@@ -699,10 +707,15 @@ fn run_recording(
             }
         }
 
-        frame_img = output::apply_image_transforms(frame_img, args.scale, args.max_dimension);
+        let frame_img = output::apply_image_transforms(
+            DynamicImage::ImageRgba8(rgba),
+            args.scale,
+            args.max_dimension,
+        );
 
+        let mut rgba = frame_img.into_rgba8();
         if let Some(grid_step) = args.grid {
-            frame_img = output::apply_grid_overlay(frame_img, grid_step);
+            output::apply_grid_overlay_in_place(&mut rgba, grid_step);
         }
 
         if args.timestamp || args.tag.is_some() {
@@ -711,8 +724,8 @@ fn run_recording(
             } else {
                 None
             };
-            frame_img = output::apply_watermark_and_tag(
-                frame_img,
+            output::apply_watermark_and_tag_in_place(
+                &mut rgba,
                 ts_str.as_deref(),
                 args.tag.as_deref(),
                 output::WatermarkPosition::BottomRight,
@@ -721,11 +734,11 @@ fn run_recording(
 
         if args.som {
             let elements =
-                som::detect_ui_elements(&frame_img, args.som_threshold, args.som_max_elements);
-            frame_img = som::draw_som_overlay(frame_img, &elements);
+                som::detect_ui_elements_from_rgba(&rgba, args.som_threshold, args.som_max_elements);
+            som::draw_som_overlay_in_place(&mut rgba, &elements);
         }
 
-        frames.push(frame_img);
+        frames.push(DynamicImage::ImageRgba8(rgba));
 
         let elapsed = frame_start.elapsed();
         if elapsed < interval {
