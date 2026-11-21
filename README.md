@@ -87,6 +87,9 @@ Options:
       --highlight-cursor      Render a prominent visual highlight ring around the mouse cursor
       --record <SECS>         Continuously sample and record screen over SECONDS duration (saved as animated GIF or image sequence)
       --fps <1-30>            Sampling framerate (FPS, 1-30) for continuous recording (default: 5)
+      --som                   Detect interactive UI elements and overlay Set-of-Mark (SoM) numbered badges for AI navigation
+      --som-threshold <1-100> Sensitivity threshold for UI element detection (default: 25)
+      --som-max-elements <N>  Maximum number of UI elements to detect and mark (default: 50)
       --open                  Open captured screenshot file with system default viewer
       --completions <SHELL>   Generate shell completion script to stdout [possible values: bash, elvish, fish, powershell, zsh]
       --json                  Output result as structured JSON (ideal for automation & AI agents)
@@ -377,6 +380,31 @@ rgc-cli --record 3.0 --fps 10 -o recording.gif
 rgc-cli -w "Code" --record 5.0 --fps 5 --cursor --output-dir ./record_frames/
 ```
 
+#### 23. Set-of-Mark (SoM) Interactive UI Element Detection
+```bash
+# Detect clickable UI elements and overlay numbered badges [1], [2], [3]
+rgc-cli --som -o som_marked.png
+
+# Output marked screenshot alongside structured JSON element coordinates and click centers
+rgc-cli --som --json -o som_marked.png
+```
+Output:
+```json
+{
+  "ok": true,
+  "data": {
+    "status": "success",
+    "path": "som_marked.png",
+    "width": 1920,
+    "height": 1080,
+    "elements": [
+      { "id": 1, "x": 120, "y": 45, "width": 80, "height": 32, "centerX": 160, "centerY": 61 },
+      { "id": 2, "x": 220, "y": 45, "width": 100, "height": 32, "centerX": 270, "centerY": 61 }
+    ]
+  }
+}
+```
+
 ---
 
 ## 🤖 Model Context Protocol (MCP) Integration
@@ -388,7 +416,7 @@ rgc-cli -w "Code" --record 5.0 --fps 5 --cursor --output-dir ./record_frames/
 1. **`list_monitors`**: Enumerate all connected screens, resolutions, and DPI scale factors.
 2. **`list_windows`**: Enumerate all active application windows, titles, IDs, and positions.
 3. **`capture_screen`**: Capture screen, window, stitched multi-monitor panorama, or cropped region with direct base64 image payload (`image/png`, `image/webp`, `image/jpeg`, `image/gif`) or output file.
-   - Arguments: `monitor` (int), `window` (string), `allMonitors` (bool), `region` (string `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"` | `"gif"`), `scale` (number `0.01..1.0`), `maxDimension` (int `>0`), `quality` (int `1..100`), `grid` (int, pixel step), `diffWith` (string, path or Base64), `diffThreshold` (int, 0..255), `cropChanged` (bool), `highlightDiff` (bool), `timestamp` (bool), `tag` (string), `waitChange` (bool), `waitTimeoutMs` (int), `waitIntervalMs` (int), `cursor` (bool), `highlightCursor` (bool), `redactions` (array), `maskWindows` (array), `outputPath` (string), `returnBase64` (bool).
+   - Arguments: `monitor` (int), `window` (string), `allMonitors` (bool), `region` (string `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"` | `"gif"`), `scale` (number `0.01..1.0`), `maxDimension` (int `>0`), `quality` (int `1..100`), `grid` (int, pixel step), `diffWith` (string, path or Base64), `diffThreshold` (int, 0..255), `cropChanged` (bool), `highlightDiff` (bool), `timestamp` (bool), `tag` (string), `waitChange` (bool), `waitTimeoutMs` (int), `waitIntervalMs` (int), `cursor` (bool), `highlightCursor` (bool), `som` (bool), `somThreshold` (int), `somMaxElements` (int), `redactions` (array), `maskWindows` (array), `outputPath` (string), `returnBase64` (bool).
 4. **`record_screen`**: Continuously record screen, window, or panorama over a specified duration into an animated GIF or sequence of frames.
    - Arguments: `durationSecs` (number, required), `fps` (int, 1..30, default 5), `monitor` (int), `window` (string), `allMonitors` (bool), `cursor` (bool), `highlightCursor` (bool), `scale` (number), `maxDimension` (int), `outputPath` (string), `returnBase64` (bool).
 5. **`doctor`**: Diagnostic check of display subsystem, active backend, and clipboard capabilities.

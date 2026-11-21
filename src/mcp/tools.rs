@@ -167,6 +167,18 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "highlightCursor": {
                         "type": "boolean",
                         "description": "Optional flag to highlight mouse cursor with a vivid amber focus ring."
+                    },
+                    "som": {
+                        "type": "boolean",
+                        "description": "Optional flag to detect interactive UI elements and overlay Set-of-Mark (SoM) numbered badges."
+                    },
+                    "somThreshold": {
+                        "type": "integer",
+                        "description": "Optional edge sensitivity threshold (5-100, default: 25) for UI element detection."
+                    },
+                    "somMaxElements": {
+                        "type": "integer",
+                        "description": "Optional maximum number of UI elements to detect and mark (default: 50)."
                     }
                 },
                 "additionalProperties": false
@@ -451,6 +463,18 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .get("highlightCursor")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let som_flag = arguments
+        .get("som")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let som_threshold = arguments
+        .get("somThreshold")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(25) as u8;
+    let som_max_elements = arguments
+        .get("somMaxElements")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as usize;
     let diff_with_str = arguments.get("diffWith").and_then(|v| v.as_str());
 
     let mut manual_masks = Vec::new();
@@ -801,12 +825,28 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         );
     }
 
+    let detected_elements = if som_flag {
+        let elements = crate::som::detect_ui_elements(&image, som_threshold, som_max_elements);
+        image = crate::som::draw_som_overlay(image, &elements);
+        Some(elements)
+    } else {
+        None
+    };
+
     let mut content = Vec::new();
 
     if let Some(ref diff_json) = diff_summary {
         content.push(ToolContent::Text {
             text: format!("Diff Analysis:\n{diff_json}"),
         });
+    }
+
+    if let Some(ref elems) = detected_elements {
+        if let Ok(elems_json) = serde_json::to_string_pretty(elems) {
+            content.push(ToolContent::Text {
+                text: format!("Detected UI Elements (Set-of-Mark):\n{elems_json}"),
+            });
+        }
     }
 
     if let Some(ref path) = output_path {
@@ -857,10 +897,15 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         } else {
             String::new()
         };
+        let som_desc = if let Some(ref elems) = detected_elements {
+            format!(" [SoM: {} UI elements detected]", elems.len())
+        } else {
+            String::new()
+        };
 
         content.push(ToolContent::Text {
             text: format!(
-                "Captured {}x{} image ({:?}, {} bytes){cursor_desc}",
+                "Captured {}x{} image ({:?}, {} bytes){cursor_desc}{som_desc}",
                 image.width(),
                 image.height(),
                 format,

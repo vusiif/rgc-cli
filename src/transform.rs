@@ -292,7 +292,7 @@ fn blend_pixel(img: &mut image::RgbaImage, x: u32, y: u32, src: image::Rgba<u8>)
 }
 
 /// Draws coordinate label using 3x5 font with background padding for high contrast.
-fn draw_label_3x5(
+pub fn draw_label_3x5(
     img: &mut image::RgbaImage,
     start_x: u32,
     start_y: u32,

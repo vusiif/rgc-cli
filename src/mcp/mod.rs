@@ -718,5 +718,8 @@ mod tests {
         assert!(res.contains("capture_screen"));
         assert!(res.contains("cursor"));
         assert!(res.contains("highlightCursor"));
+        assert!(res.contains("som"));
+        assert!(res.contains("somThreshold"));
+        assert!(res.contains("somMaxElements"));
     }
 }

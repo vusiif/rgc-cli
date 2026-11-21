@@ -115,6 +115,19 @@ pub struct CursorInfo {
     pub visible: bool,
 }
 
+/// Detected interactive UI element with bounding box and center click anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiElement {
+    pub id: u32,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub center_x: u32,
+    pub center_y: u32,
+}
+
 /// Structured JSON representation of the capture operation result.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,6 +145,8 @@ pub struct CaptureResultJson {
     pub diff: Option<DiffResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<CursorInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elements: Option<Vec<UiElement>>,
 }
 
 /// Structured JSON representation of the continuous recording result.

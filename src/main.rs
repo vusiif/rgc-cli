@@ -6,6 +6,7 @@ pub mod cli;
 pub mod doctor;
 pub mod mcp;
 pub mod output;
+pub mod som;
 pub mod transform;
 
 use clap::Parser;
@@ -464,6 +465,16 @@ fn run(args: Cli) -> Result<(), ApiError> {
         );
     }
 
+    // 4.5 Detect UI elements and apply Set-of-Mark (SoM) visual overlay if requested
+    let detected_elements = if args.som {
+        let elements =
+            som::detect_ui_elements(&dynamic_image, args.som_threshold, args.som_max_elements);
+        dynamic_image = som::draw_som_overlay(dynamic_image, &elements);
+        Some(elements)
+    } else {
+        None
+    };
+
     let img_width = dynamic_image.width();
     let img_height = dynamic_image.height();
 
@@ -500,6 +511,12 @@ fn run(args: Cli) -> Result<(), ApiError> {
                     diff.changed, diff.changed_pixels, diff.changed_percent, diff.bbox
                 );
             }
+            if let Some(ref elems) = detected_elements {
+                println!(
+                    "Set-of-Mark (SoM): detected {} interactive UI elements",
+                    elems.len()
+                );
+            }
         }
 
         if args.open {
@@ -521,6 +538,7 @@ fn run(args: Cli) -> Result<(), ApiError> {
             size_bytes: file_size_bytes,
             diff: diff_result,
             cursor: cursor_info,
+            elements: detected_elements,
         };
         print_json_success(result_payload)?;
     }
@@ -599,6 +617,12 @@ fn run_recording(
                 args.tag.as_deref(),
                 output::WatermarkPosition::BottomRight,
             );
+        }
+
+        if args.som {
+            let elements =
+                som::detect_ui_elements(&frame_img, args.som_threshold, args.som_max_elements);
+            frame_img = som::draw_som_overlay(frame_img, &elements);
         }
 
         frames.push(frame_img);

@@ -87,6 +87,9 @@ cargo build --release
       --highlight-cursor      在鼠标光标周围渲染醒目的琥珀金色聚焦光环
       --record <SECS>         连续时间片抽样并录制指定秒数屏幕 (保存为 GIF 动图或图像序列帧)
       --fps <1-30>            连续录制采样帧率 FPS (1-30，默认 5 FPS)
+      --som                   自动检测可交互 UI 控件并叠加 Set-of-Mark (SoM) 编号徽标
+      --som-threshold <1-100> 控件边缘检测灵敏度阈值 (默认 25)
+      --som-max-elements <N>  最大标注控件元素数量 (默认 50)
       --open                  截图保存后自动调用系统默认查看器打开
       --completions <SHELL>   生成终端 Tab 自动补全脚本到 stdout [可选: bash, elvish, fish, powershell, zsh]
       --json                  以结构化 JSON 格式输出结果 (非常适合自动化与 AI 智能体)
@@ -377,6 +380,31 @@ rgc-cli --record 3.0 --fps 10 -o recording.gif
 rgc-cli -w "Code" --record 5.0 --fps 5 --cursor --output-dir ./record_frames/
 ```
 
+#### 23. Set-of-Mark (SoM) 视觉控件自动检测与编号打标
+```bash
+# 自动识别界面按钮与输入框，并叠加编号角标 [1], [2], [3]
+rgc-cli --som -o som_marked.png
+
+# 输出打标截图并获取结构化元素坐标与点击中心点 JSON
+rgc-cli --som --json -o som_marked.png
+```
+输出：
+```json
+{
+  "ok": true,
+  "data": {
+    "status": "success",
+    "path": "som_marked.png",
+    "width": 1920,
+    "height": 1080,
+    "elements": [
+      { "id": 1, "x": 120, "y": 45, "width": 80, "height": 32, "centerX": 160, "centerY": 61 },
+      { "id": 2, "x": 220, "y": 45, "width": 100, "height": 32, "centerX": 270, "centerY": 61 }
+    ]
+  }
+}
+```
+
 ---
 
 ## 🤖 Model Context Protocol (MCP) 智能体集成
@@ -388,7 +416,7 @@ rgc-cli -w "Code" --record 5.0 --fps 5 --cursor --output-dir ./record_frames/
 1. **`list_monitors`**: 枚举所有屏幕、分辨率与 DPI 缩放系数。
 2. **`list_windows`**: 枚举所有活动应用窗口的标题、ID 及坐标尺寸。
 3. **`capture_screen`**: 捕获指定屏幕、窗口、全景多屏或局部区域，支持直接返回 Base64 编码图片数据（`image/png`, `image/webp`, `image/jpeg`, `image/gif`）或落盘至本地文件。
-   - 参数：`monitor` (整数/字符串), `window` (窗口 ID/标题), `allMonitors` (布尔值，多屏全景拼接), `region` (字符串 `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"` | `"gif"`), `scale` (浮点数 `0.01..1.0`), `maxDimension` (最大像素 `>0`), `quality` (压缩质量 `1..100`), `grid` (网格步长整数), `diffWith` (历史图像路径或 Base64 字符串), `diffThreshold` (像素容差阈值 0-255), `cropChanged` (布尔值), `highlightDiff` (布尔值), `timestamp` (布尔值), `tag` (字符串), `waitChange` (布尔值), `waitTimeoutMs` (整数), `waitIntervalMs` (整数), `cursor` (布尔值), `highlightCursor` (布尔值), `redactions` (数组), `maskWindows` (数组), `outputPath` (字符串), `returnBase64` (布尔值)。
+   - 参数：`monitor` (整数/字符串), `window` (窗口 ID/标题), `allMonitors` (布尔值，多屏全景拼接), `region` (字符串 `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"` | `"gif"`), `scale` (浮点数 `0.01..1.0`), `maxDimension` (最大像素 `>0`), `quality` (压缩质量 `1..100`), `grid` (网格步长整数), `diffWith` (历史图像路径或 Base64 字符串), `diffThreshold` (像素容差阈值 0-255), `cropChanged` (布尔值), `highlightDiff` (布尔值), `timestamp` (布尔值), `tag` (字符串), `waitChange` (布尔值), `waitTimeoutMs` (整数), `waitIntervalMs` (整数), `cursor` (布尔值), `highlightCursor` (布尔值), `som` (布尔值), `somThreshold` (整数), `somMaxElements` (整数), `redactions` (数组), `maskWindows` (数组), `outputPath` (字符串), `returnBase64` (布尔值)。
 4. **`record_screen`**: 连续录制屏幕、窗口或全景多屏指定秒数，编码为动画 GIF 或连续序列帧。
    - 参数：`durationSecs` (浮点数，必填), `fps` (整数 1..30，默认 5), `monitor` (整数), `window` (字符串), `allMonitors` (布尔值), `cursor` (布尔值), `highlightCursor` (布尔值), `scale` (浮点数), `maxDimension` (整数), `outputPath` (字符串), `returnBase64` (布尔值)。
 5. **`doctor`**: 诊断检查当前图形显示子系统与捕获就绪状态。

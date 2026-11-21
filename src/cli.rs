@@ -202,7 +202,8 @@ pub struct Cli {
             "scale", "max_dimension", "quality", "open", "mask", "mask_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
             "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
-            "cursor", "highlight_cursor", "record", "fps"
+            "cursor", "highlight_cursor", "record", "fps",
+            "som", "som_threshold", "som_max_elements"
         ]
     )]
     pub doctor: bool,
@@ -216,7 +217,8 @@ pub struct Cli {
             "coords", "json", "scale", "max_dimension", "quality", "open", "mask", "mask_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
             "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
-            "cursor", "highlight_cursor", "record", "fps"
+            "cursor", "highlight_cursor", "record", "fps",
+            "som", "som_threshold", "som_max_elements"
         ]
     )]
     pub mcp: bool,
@@ -451,6 +453,18 @@ pub struct Cli {
         value_parser = clap::value_parser!(u32).range(1..=30)
     )]
     pub fps: u32,
+
+    /// Detect interactive UI elements and overlay Set-of-Mark (SoM) numbered badges for AI navigation
+    #[arg(long = "som")]
+    pub som: bool,
+
+    /// Sensitivity / edge threshold (5-100, default: 25) for UI element detection
+    #[arg(long = "som-threshold", value_name = "1-100", default_value_t = 25)]
+    pub som_threshold: u8,
+
+    /// Maximum number of UI elements to detect and mark (default: 50)
+    #[arg(long = "som-max-elements", value_name = "COUNT", default_value_t = 50)]
+    pub som_max_elements: usize,
 
     /// Open captured screenshot file with system default viewer
     #[arg(
@@ -905,5 +919,22 @@ mod tests {
         // Record conflict with doctor
         assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--record", "2.0"]).is_err());
         assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--cursor"]).is_err());
+
+        // Phase 11: Set-of-Mark (SoM) options
+        let cli_som = Cli::try_parse_from([
+            "rgc-cli",
+            "--som",
+            "--som-threshold",
+            "30",
+            "--som-max-elements",
+            "20",
+        ])
+        .unwrap();
+        assert!(cli_som.som);
+        assert_eq!(cli_som.som_threshold, 30);
+        assert_eq!(cli_som.som_max_elements, 20);
+
+        // SoM conflict with doctor
+        assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--som"]).is_err());
     }
 }
