@@ -635,6 +635,107 @@ pub fn apply_watermark_and_tag(
     DynamicImage::ImageRgba8(rgba)
 }
 
+/// Draw an overlaid mouse cursor arrow (with optional focus halo ring) onto the canvas.
+/// Uses pure Safe Rust, alpha-blends with the existing background, and clamps to canvas boundaries.
+pub fn draw_cursor_overlay(
+    image: DynamicImage,
+    cursor_x: i32,
+    cursor_y: i32,
+    highlight: bool,
+) -> DynamicImage {
+    let mut rgba = image.into_rgba8();
+    let width = rgba.width() as i32;
+    let height = rgba.height() as i32;
+
+    // Helper closure to blend a pixel safely
+    let mut blend_px = |x: i32, y: i32, color: image::Rgba<u8>| {
+        if x < 0 || y < 0 || x >= width || y >= height {
+            return;
+        }
+        let alpha = color[3] as f32 / 255.0;
+        if alpha <= 0.0 {
+            return;
+        }
+        let px = rgba.get_pixel_mut(x as u32, y as u32);
+        if alpha >= 1.0 {
+            *px = color;
+            return;
+        }
+        let inv_alpha = 1.0 - alpha;
+        px[0] = (color[0] as f32 * alpha + px[0] as f32 * inv_alpha).round() as u8;
+        px[1] = (color[1] as f32 * alpha + px[1] as f32 * inv_alpha).round() as u8;
+        px[2] = (color[2] as f32 * alpha + px[2] as f32 * inv_alpha).round() as u8;
+        px[3] = (color[3] as f32 + px[3] as f32 * (1.0 - color[3] as f32 / 255.0)).min(255.0) as u8;
+    };
+
+    // 1. Draw highlight focus ring if requested
+    if highlight {
+        let ring_inner = 14;
+        let ring_outer = 18;
+        let ring_inner_sq = ring_inner * ring_inner;
+        let ring_outer_sq = ring_outer * ring_outer;
+        let ring_color = image::Rgba([255, 179, 0, 210]); // Vivid Amber / Golden highlight
+        let crosshair_color = image::Rgba([255, 87, 34, 230]); // Deep Orange crosshair markers
+
+        for dy in -ring_outer..=ring_outer {
+            for dx in -ring_outer..=ring_outer {
+                let d_sq = dx * dx + dy * dy;
+                if d_sq >= ring_inner_sq && d_sq <= ring_outer_sq {
+                    blend_px(cursor_x + dx, cursor_y + dy, ring_color);
+                }
+            }
+        }
+
+        // Draw subtle 3px tick marks on 4 axes: left, right, top, bottom
+        for i in 19..=22 {
+            blend_px(cursor_x + i, cursor_y, crosshair_color);
+            blend_px(cursor_x - i, cursor_y, crosshair_color);
+            blend_px(cursor_x, cursor_y + i, crosshair_color);
+            blend_px(cursor_x, cursor_y - i, crosshair_color);
+        }
+    }
+
+    // 2. Overlay 11x17 classic cursor arrow bitmap
+    // 0 = transparent, 1 = black border (#000000), 2 = white interior (#FFFFFF)
+    #[rustfmt::skip]
+    const ARROW_PATTERN: [[u8; 11]; 17] = [
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+        [1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0],
+        [1, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0],
+        [1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0],
+        [1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0],
+        [1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0],
+        [1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0],
+        [1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0],
+        [1, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1],
+        [1, 2, 2, 1, 2, 2, 1, 0, 0, 0, 0],
+        [1, 2, 1, 0, 1, 2, 2, 1, 0, 0, 0],
+        [1, 1, 0, 0, 1, 2, 2, 1, 0, 0, 0],
+        [1, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0],
+        [0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0],
+        [0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0],
+    ];
+
+    let black = image::Rgba([0, 0, 0, 255]);
+    let white = image::Rgba([255, 255, 255, 255]);
+
+    for (row_idx, row) in ARROW_PATTERN.iter().enumerate() {
+        for (col_idx, &val) in row.iter().enumerate() {
+            let px_x = cursor_x + col_idx as i32;
+            let px_y = cursor_y + row_idx as i32;
+            match val {
+                1 => blend_px(px_x, px_y, black),
+                2 => blend_px(px_x, px_y, white),
+                _ => {}
+            }
+        }
+    }
+
+    DynamicImage::ImageRgba8(rgba)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,5 +951,38 @@ mod tests {
         assert!(get_glyph_3x5(' ').is_some());
         // Unknown symbol returns None
         assert!(get_glyph_3x5('~').is_none());
+    }
+
+    #[test]
+    fn test_draw_cursor_overlay_standard() {
+        let base = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            100,
+            100,
+            image::Rgba([128, 128, 128, 255]),
+        ));
+        let with_cursor = draw_cursor_overlay(base, 20, 20, false);
+        let rgba = with_cursor.into_rgba8();
+
+        // Tip of the cursor at (20, 20) is black border
+        assert_eq!(rgba.get_pixel(20, 20), &image::Rgba([0, 0, 0, 255]));
+        // Interior of cursor arrow at (21, 22) is white interior
+        assert_eq!(rgba.get_pixel(21, 22), &image::Rgba([255, 255, 255, 255]));
+        // Outside the cursor bounding box should be unchanged
+        assert_eq!(rgba.get_pixel(10, 10), &image::Rgba([128, 128, 128, 255]));
+    }
+
+    #[test]
+    fn test_draw_cursor_overlay_highlight() {
+        let base =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(100, 100, image::Rgba([0, 0, 0, 255])));
+        let with_highlight = draw_cursor_overlay(base, 50, 50, true);
+        let rgba = with_highlight.into_rgba8();
+
+        // Cursor tip at (50, 50)
+        assert_eq!(rgba.get_pixel(50, 50), &image::Rgba([0, 0, 0, 255]));
+        // Ring radius ~16 pixels right at (66, 50) should be modified (amber ring)
+        let ring_px = rgba.get_pixel(66, 50);
+        assert_ne!(ring_px, &image::Rgba([0, 0, 0, 255]));
+        assert!(ring_px[0] > 100); // Amber has high red
     }
 }

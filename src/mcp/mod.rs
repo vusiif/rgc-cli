@@ -1,5 +1,6 @@
 pub mod base64;
 pub mod prompts;
+pub mod record;
 pub mod resources;
 pub mod tools;
 pub mod types;
@@ -60,8 +61,8 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
                     capabilities: ServerCapabilities {
                         tools: serde_json::json!({}),
                         resources: Some(serde_json::json!({
-                            "subscribe": false,
-                            "listChanged": false,
+                            "subscribe": true,
+                            "listChanged": true,
                         })),
                         prompts: Some(serde_json::json!({
                             "listChanged": false,
@@ -249,6 +250,60 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
                 }
             }
         }
+        "resources/subscribe" => {
+            let uri = req.params.get("uri").and_then(|v| v.as_str());
+            let uri = match uri {
+                Some(u) => u,
+                None => {
+                    let err = JsonRpcErrorResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        error: JsonRpcError {
+                            code: -32602,
+                            message: "Missing 'uri' parameter in resources/subscribe request"
+                                .to_string(),
+                            data: None,
+                        },
+                    };
+                    return serde_json::to_string(&err).ok();
+                }
+            };
+
+            subscribe_resource(uri);
+            let res = JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: serde_json::json!({}),
+            };
+            serde_json::to_string(&res).ok()
+        }
+        "resources/unsubscribe" => {
+            let uri = req.params.get("uri").and_then(|v| v.as_str());
+            let uri = match uri {
+                Some(u) => u,
+                None => {
+                    let err = JsonRpcErrorResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        error: JsonRpcError {
+                            code: -32602,
+                            message: "Missing 'uri' parameter in resources/unsubscribe request"
+                                .to_string(),
+                            data: None,
+                        },
+                    };
+                    return serde_json::to_string(&err).ok();
+                }
+            };
+
+            unsubscribe_resource(uri);
+            let res = JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: serde_json::json!({}),
+            };
+            serde_json::to_string(&res).ok()
+        }
         "prompts/list" => {
             let res = JsonRpcResponse {
                 jsonrpc: "2.0",
@@ -291,43 +346,69 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
 }
 
 /// Run Model Context Protocol (MCP) server loop over standard I/O streams.
-pub fn run_mcp_loop(reader: impl BufRead, mut writer: impl Write) -> std::io::Result<()> {
+pub fn run_mcp_loop(reader: impl BufRead, writer: impl Write + Send) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
     info!("Starting MCP stdio server loop");
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::UnexpectedEof
-                    || e.kind() == std::io::ErrorKind::BrokenPipe
-                {
+    let writer_mutex = Mutex::new(writer);
+    let running = AtomicBool::new(true);
+
+    std::thread::scope(|s| {
+        // Background thread to poll subscribed resources and emit change notifications
+        s.spawn(|| {
+            let mut last_check = std::time::Instant::now();
+            while running.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if !running.load(Ordering::Relaxed) {
                     break;
                 }
-                error!("Error reading line from MCP stdin: {e}");
-                return Err(e);
+                if last_check.elapsed() >= std::time::Duration::from_secs(2) {
+                    last_check = std::time::Instant::now();
+                    let subs = get_subscriptions();
+                    if !subs.is_empty() {
+                        for uri in subs {
+                            let notif = create_resource_updated_notification(&uri);
+                            if let Ok(mut w) = writer_mutex.lock() {
+                                let _ = writeln!(w, "{notif}");
+                                let _ = w.flush();
+                            }
+                        }
+                    }
+                }
             }
-        };
+        });
 
-        if line.trim().is_empty() {
-            continue;
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof
+                        || e.kind() == std::io::ErrorKind::BrokenPipe
+                    {
+                        break;
+                    }
+                    error!("Error reading line from MCP stdin: {e}");
+                    break;
+                }
+            };
+
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            if let Some(response_json) = handle_mcp_message(&line) {
+                if let Ok(mut w) = writer_mutex.lock() {
+                    if writeln!(w, "{response_json}").is_err() || w.flush().is_err() {
+                        break;
+                    }
+                }
+            }
         }
 
-        if let Some(response_json) = handle_mcp_message(&line) {
-            if let Err(e) = writeln!(writer, "{response_json}") {
-                if e.kind() == std::io::ErrorKind::BrokenPipe {
-                    debug!("Downstream MCP client closed pipe (BrokenPipe)");
-                    break;
-                }
-                return Err(e);
-            }
-            if let Err(e) = writer.flush() {
-                if e.kind() == std::io::ErrorKind::BrokenPipe {
-                    debug!("Downstream MCP client closed pipe during flush (BrokenPipe)");
-                    break;
-                }
-                return Err(e);
-            }
-        }
-    }
+        running.store(false, Ordering::Relaxed);
+    });
+
     info!("Exiting MCP stdio server loop");
     Ok(())
 }
@@ -336,7 +417,7 @@ pub fn run_mcp_loop(reader: impl BufRead, mut writer: impl Write) -> std::io::Re
 pub fn run_mcp_server() -> std::io::Result<()> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    run_mcp_loop(stdin.lock(), stdout.lock())
+    run_mcp_loop(stdin.lock(), stdout)
 }
 
 #[cfg(test)]
@@ -604,5 +685,38 @@ mod tests {
         run_mcp_loop(input.as_bytes(), &mut output).unwrap();
         let output_str = String::from_utf8(output).unwrap();
         assert!(output_str.contains(r#""id":10"#));
+    }
+
+    #[test]
+    fn test_handle_mcp_subscribe_and_unsubscribe() {
+        clear_subscriptions();
+        assert!(get_subscriptions().is_empty());
+
+        let sub_req = r#"{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"screen://current"}}"#;
+        let sub_res = handle_mcp_message(sub_req).unwrap();
+        assert!(sub_res.contains(r#""result":{}"#));
+        assert!(get_subscriptions().contains(&"screen://current".to_string()));
+
+        let unsub_req = r#"{"jsonrpc":"2.0","id":2,"method":"resources/unsubscribe","params":{"uri":"screen://current"}}"#;
+        let unsub_res = handle_mcp_message(unsub_req).unwrap();
+        assert!(unsub_res.contains(r#""result":{}"#));
+        assert!(!get_subscriptions().contains(&"screen://current".to_string()));
+    }
+
+    #[test]
+    fn test_handle_mcp_subscribe_missing_uri() {
+        let req = r#"{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{}}"#;
+        let res = handle_mcp_message(req).unwrap();
+        assert!(res.contains(r#""code":-32602"#));
+    }
+
+    #[test]
+    fn test_handle_mcp_tools_list_has_record_screen() {
+        let tools_req = r#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#;
+        let res = handle_mcp_message(tools_req).unwrap();
+        assert!(res.contains("record_screen"));
+        assert!(res.contains("capture_screen"));
+        assert!(res.contains("cursor"));
+        assert!(res.contains("highlightCursor"));
     }
 }

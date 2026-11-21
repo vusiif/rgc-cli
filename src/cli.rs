@@ -151,6 +151,7 @@ pub enum ImageFormat {
     Png,
     Jpeg,
     Webp,
+    Gif,
 }
 
 impl ImageFormat {
@@ -159,6 +160,7 @@ impl ImageFormat {
             ImageFormat::Png => "png",
             ImageFormat::Jpeg => "jpg",
             ImageFormat::Webp => "webp",
+            ImageFormat::Gif => "gif",
         }
     }
 }
@@ -199,7 +201,8 @@ pub struct Cli {
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
-            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval"
+            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
+            "cursor", "highlight_cursor", "record", "fps"
         ]
     )]
     pub doctor: bool,
@@ -212,7 +215,8 @@ pub struct Cli {
             "output_file", "output_dir", "clipboard", "delay", "format",
             "coords", "json", "scale", "max_dimension", "quality", "open", "mask", "mask_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
-            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval"
+            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
+            "cursor", "highlight_cursor", "record", "fps"
         ]
     )]
     pub mcp: bool,
@@ -422,6 +426,31 @@ pub struct Cli {
     /// Polling interval in milliseconds between change detection frames (default: 100 ms)
     #[arg(long = "wait-interval", value_name = "MS", default_value_t = 100)]
     pub wait_interval: u64,
+
+    /// Capture and render mouse cursor on the screenshot
+    #[arg(long = "cursor")]
+    pub cursor: bool,
+
+    /// Render a prominent visual highlight ring around the mouse cursor
+    #[arg(long = "highlight-cursor")]
+    pub highlight_cursor: bool,
+
+    /// Continuously sample and record screen over SECONDS duration (saved as animated GIF or image sequence)
+    #[arg(
+        long = "record",
+        value_name = "SECS",
+        value_parser = clap::value_parser!(f32)
+    )]
+    pub record: Option<f32>,
+
+    /// Sampling framerate (FPS, 1-30) for continuous recording (default: 5)
+    #[arg(
+        long = "fps",
+        value_name = "1-30",
+        default_value_t = 5,
+        value_parser = clap::value_parser!(u32).range(1..=30)
+    )]
+    pub fps: u32,
 
     /// Open captured screenshot file with system default viewer
     #[arg(
@@ -856,5 +885,25 @@ mod tests {
 
         // Wait change conflict with doctor
         assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--wait-change"]).is_err());
+
+        // Phase 10: Cursor and Recording options
+        let cli_phase10 = Cli::try_parse_from([
+            "rgc-cli",
+            "--cursor",
+            "--highlight-cursor",
+            "--record",
+            "3.5",
+            "--fps",
+            "10",
+        ])
+        .unwrap();
+        assert!(cli_phase10.cursor);
+        assert!(cli_phase10.highlight_cursor);
+        assert_eq!(cli_phase10.record, Some(3.5));
+        assert_eq!(cli_phase10.fps, 10);
+
+        // Record conflict with doctor
+        assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--record", "2.0"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--cursor"]).is_err());
     }
 }

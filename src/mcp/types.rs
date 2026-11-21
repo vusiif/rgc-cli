@@ -24,6 +24,14 @@ pub struct JsonRpcErrorResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct JsonRpcNotification<T> {
+    pub jsonrpc: &'static str,
+    pub method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<T>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,

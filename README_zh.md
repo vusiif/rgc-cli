@@ -69,7 +69,7 @@ cargo build --release
       --output-dir <DIR>      显式指定输出目录目标 (在指定目录内生成防重时间戳文件)
   -c, --clipboard             将截图直接复制至系统剪贴板
   -d, --delay <MS>            截图前延时等待毫秒数 (例如 1000 表示延时 1 秒)
-  -f, --format <FORMAT>       输出图片格式，缺省时自动根据扩展名推断 [可选: png, jpeg, webp]
+  -f, --format <FORMAT>       输出图片格式，缺省时自动根据扩展名推断 [可选: png, jpeg, webp, gif]
       --scale <FACTOR>        按比例缩放图像 (0.01 到 1.0 之间，例如 0.5 缩小一半)
       --max-dimension <PX>    限制图像最大宽度或高度 (像素)，保持原始纵横比
       --quality <1-100>       JPEG 输出压缩质量 (1-100，默认 85)
@@ -83,6 +83,10 @@ cargo build --release
       --wait-change           等待屏幕/窗口发生视觉变动后立即捕获 (适合 UI 自动化与点击响应确认)
       --wait-timeout <MS>     等待视觉变动的最大超时毫秒数 (默认 5000 毫秒)
       --wait-interval <MS>    变动检测轮询间隔毫秒数 (默认 100 毫秒)
+      --cursor                捕获并在截图中渲染鼠标光标箭头
+      --highlight-cursor      在鼠标光标周围渲染醒目的琥珀金色聚焦光环
+      --record <SECS>         连续时间片抽样并录制指定秒数屏幕 (保存为 GIF 动图或图像序列帧)
+      --fps <1-30>            连续录制采样帧率 FPS (1-30，默认 5 FPS)
       --open                  截图保存后自动调用系统默认查看器打开
       --completions <SHELL>   生成终端 Tab 自动补全脚本到 stdout [可选: bash, elvish, fish, powershell, zsh]
       --json                  以结构化 JSON 格式输出结果 (非常适合自动化与 AI 智能体)
@@ -355,20 +359,43 @@ rgc-cli --doctor --json
 }
 ```
 
+#### 21. 鼠标光标捕获与热区聚焦光环
+```bash
+# 捕获并在截图中渲染鼠标光标箭头
+rgc-cli --cursor -o shot_with_cursor.png
+
+# 在鼠标光标处绘制高对比度醒目聚焦光环 (极大提升教程与多屏 Agent 视觉定位效率)
+rgc-cli --highlight-cursor -o shot_highlighted.png
+```
+
+#### 22. 连续时间片抽样与连拍录制动图
+```bash
+# 录制屏幕 3 秒 (10 FPS 采样) 并自动保存为平滑 GIF 动图
+rgc-cli --record 3.0 --fps 10 -o recording.gif
+
+# 针对指定应用窗口录制 5 秒 (5 FPS 采样)，带光标高亮并保存到文件夹为连续帧序列
+rgc-cli -w "Code" --record 5.0 --fps 5 --cursor --output-dir ./record_frames/
+```
+
 ---
 
 ## 🤖 Model Context Protocol (MCP) 智能体集成
 
-`rgc-cli` 内置标准 MCP stdio 服务端，支持 JSON-RPC 2.0 协议。可直接集成到 Claude Desktop、Cursor、Cline、Roo Code、Windsurf 等 AI 智能体中。
+`rgc-cli` 内置标准 MCP stdio 服务端，支持 JSON-RPC 2.0 协议。可直接集成到 Claude Desktop、Cursor、Cline、Roo Code、Windsurf 等 AI 智能体中，支持截图、录像、视觉变动主动推送与环境自检。
 
 ### 提供的 MCP 工具列表
 
 1. **`list_monitors`**: 枚举所有屏幕、分辨率与 DPI 缩放系数。
-2. **`capture_screen`**: 捕获指定屏幕、窗口、全景多屏或局部区域，支持直接返回 Base64 编码图片数据（`image/png`, `image/webp`, `image/jpeg`）或落盘至本地文件。
-   - 参数：`monitor` (整数/字符串), `window` (窗口 ID/标题), `allMonitors` (布尔值，多屏全景拼接), `region` (字符串 `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `scale` (浮点数 `0.01..1.0`), `maxDimension` (最大像素 `>0`), `quality` (压缩质量 `1..100`), `grid` (网格步长整数), `diffWith` (历史图像路径或 Base64 字符串), `diffThreshold` (像素容差阈值 0-255), `cropChanged` (布尔值，自动裁剪变动外接矩形), `redactions` (数组：`["100,100,200,200:blur"]` 或 `[{"region":"100,100,200,200","effect":"transparent"}]`), `maskWindows` (数组：`["1Password", "WeChat:blur"]`), `outputPath` (字符串), `returnBase64` (布尔值)。
-3. **`doctor`**: 诊断检查当前图形显示子系统与捕获就绪状态。
+2. **`list_windows`**: 枚举所有活动应用窗口的标题、ID 及坐标尺寸。
+3. **`capture_screen`**: 捕获指定屏幕、窗口、全景多屏或局部区域，支持直接返回 Base64 编码图片数据（`image/png`, `image/webp`, `image/jpeg`, `image/gif`）或落盘至本地文件。
+   - 参数：`monitor` (整数/字符串), `window` (窗口 ID/标题), `allMonitors` (布尔值，多屏全景拼接), `region` (字符串 `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"` | `"gif"`), `scale` (浮点数 `0.01..1.0`), `maxDimension` (最大像素 `>0`), `quality` (压缩质量 `1..100`), `grid` (网格步长整数), `diffWith` (历史图像路径或 Base64 字符串), `diffThreshold` (像素容差阈值 0-255), `cropChanged` (布尔值), `highlightDiff` (布尔值), `timestamp` (布尔值), `tag` (字符串), `waitChange` (布尔值), `waitTimeoutMs` (整数), `waitIntervalMs` (整数), `cursor` (布尔值), `highlightCursor` (布尔值), `redactions` (数组), `maskWindows` (数组), `outputPath` (字符串), `returnBase64` (布尔值)。
+4. **`record_screen`**: 连续录制屏幕、窗口或全景多屏指定秒数，编码为动画 GIF 或连续序列帧。
+   - 参数：`durationSecs` (浮点数，必填), `fps` (整数 1..30，默认 5), `monitor` (整数), `window` (字符串), `allMonitors` (布尔值), `cursor` (布尔值), `highlightCursor` (布尔值), `scale` (浮点数), `maxDimension` (整数), `outputPath` (字符串), `returnBase64` (布尔值)。
+5. **`doctor`**: 诊断检查当前图形显示子系统与捕获就绪状态。
 
-### 提供的 MCP 资源 (Resources) 列表
+### 提供的 MCP 资源 (Resources) 与变动主动订阅
+
+`rgc-cli` 全面支持 MCP 资源主动订阅 (`resources/subscribe` & `resources/unsubscribe`) 与实时更新推送 (`notifications/resources/updated`)：
 
 1. **`screen://current`**: 当前主显示器画面的实时快照（`image/png` Base64 二进制资源）。
 2. **`screen://all`**: 所有活动显示器自动拼接的超宽全景快照（`image/png` Base64 二进制资源）。

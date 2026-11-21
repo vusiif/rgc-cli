@@ -11,11 +11,15 @@ pub mod transform;
 use clap::Parser;
 use cli::Cli;
 use log::debug;
-use output::{ApiError, ApiResponse, CaptureResultJson, ErrorCode, OutputDestination};
+use output::{
+    ApiError, ApiResponse, CaptureResultJson, ErrorCode, ImageFormat, OutputDestination,
+    RecordResultJson,
+};
 use std::fs;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() -> ExitCode {
     let args = Cli::parse();
@@ -91,7 +95,7 @@ fn capture_target(args: &Cli) -> Result<RawCaptured, ApiError> {
             image: captured.image,
             scale_factor: captured.scale_factor,
             crop_offset: captured.crop_offset,
-            monitor_origin: None,
+            monitor_origin: Some(captured.window_origin),
         })
     } else {
         debug!(
@@ -268,8 +272,23 @@ fn run(args: Cli) -> Result<(), ApiError> {
         ));
     }
 
+    if is_stdout && args.record.is_some() {
+        return Err(ApiError::new(
+            ErrorCode::BadArgs,
+            "Cannot stream continuous recording to stdout ('-o -'). \
+             Specify an output file destination (.gif) or directory with -o, --output-file, or --output-dir.",
+        )
+        .with_stage("argument_validation")
+        .with_suggestion("Provide a target output path (e.g. -o recording.gif or --output-dir ./frames)."));
+    }
+
     // Infer image format and validate against file extension if explicit format provided
     let format = output::validate_and_infer_format(&destination, args.format)?;
+
+    // 2.5 Handle continuous recording if requested
+    if let Some(record_secs) = args.record {
+        return run_recording(&args, record_secs, destination);
+    }
 
     // 3. Handle delayed capture if requested
     if let Some(delay_ms) = args.delay {
@@ -346,7 +365,27 @@ fn run(args: Cli) -> Result<(), ApiError> {
     let crop_offset = raw_captured.crop_offset;
     let monitor_origin = raw_captured.monitor_origin;
 
-    // 4.1 Apply privacy redaction masks (transparent hole, blackout, pixelate, blur) before scaling
+    // 4.1 Apply mouse cursor overlay if requested or query cursor info
+    let global_cursor = capture::get_global_cursor_position();
+    let cursor_info = capture::resolve_cursor_on_canvas(
+        global_cursor,
+        monitor_origin.unwrap_or((0, 0)),
+        scale_factor,
+        crop_offset,
+        (dynamic_image.width(), dynamic_image.height()),
+    );
+
+    let dynamic_image = if args.cursor || args.highlight_cursor {
+        if let Some(ref c) = cursor_info {
+            transform::draw_cursor_overlay(dynamic_image, c.x, c.y, args.highlight_cursor)
+        } else {
+            dynamic_image
+        }
+    } else {
+        dynamic_image
+    };
+
+    // 4.2 Apply privacy redaction masks (transparent hole, blackout, pixelate, blur) before scaling
     let dynamic_image = if !args.mask.is_empty() || !args.mask_window.is_empty() {
         let windows = if !args.mask_window.is_empty() {
             capture::get_windows().ok()
@@ -481,8 +520,167 @@ fn run(args: Cli) -> Result<(), ApiError> {
             clipboard: args.clipboard,
             size_bytes: file_size_bytes,
             diff: diff_result,
+            cursor: cursor_info,
         };
         print_json_success(result_payload)?;
+    }
+
+    Ok(())
+}
+
+fn run_recording(
+    args: &Cli,
+    record_secs: f32,
+    destination: OutputDestination,
+) -> Result<(), ApiError> {
+    if let Some(delay_ms) = args.delay {
+        if delay_ms > 0 {
+            if !args.quiet && !args.json {
+                println!("Waiting {} ms before recording...", delay_ms);
+            }
+            sleep(Duration::from_millis(delay_ms));
+        }
+    }
+
+    let fps = args.fps.clamp(1, 30);
+    let interval = Duration::from_secs_f32(1.0 / fps as f32);
+    let total_duration = Duration::from_secs_f32(record_secs.max(0.1));
+    let start_time = Instant::now();
+
+    if !args.quiet && !args.json {
+        println!(
+            "Recording screen for {:.1}s at {} FPS (sampling every {} ms)...",
+            record_secs,
+            fps,
+            interval.as_millis()
+        );
+    }
+
+    let mut frames = Vec::new();
+    while start_time.elapsed() < total_duration {
+        let frame_start = Instant::now();
+        let raw = capture_target(args)?;
+        let mut frame_img = raw.image;
+
+        if args.cursor || args.highlight_cursor {
+            let global_cursor = capture::get_global_cursor_position();
+            let origin = raw.monitor_origin.unwrap_or((0, 0));
+            if let Some(cursor_info) = capture::resolve_cursor_on_canvas(
+                global_cursor,
+                origin,
+                raw.scale_factor,
+                raw.crop_offset,
+                (frame_img.width(), frame_img.height()),
+            ) {
+                frame_img = transform::draw_cursor_overlay(
+                    frame_img,
+                    cursor_info.x,
+                    cursor_info.y,
+                    args.highlight_cursor,
+                );
+            }
+        }
+
+        frame_img = output::apply_image_transforms(frame_img, args.scale, args.max_dimension);
+
+        if let Some(grid_step) = args.grid {
+            frame_img = output::apply_grid_overlay(frame_img, grid_step);
+        }
+
+        if args.timestamp || args.tag.is_some() {
+            let ts_str = if args.timestamp {
+                Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+            } else {
+                None
+            };
+            frame_img = output::apply_watermark_and_tag(
+                frame_img,
+                ts_str.as_deref(),
+                args.tag.as_deref(),
+                output::WatermarkPosition::BottomRight,
+            );
+        }
+
+        frames.push(frame_img);
+
+        let elapsed = frame_start.elapsed();
+        if elapsed < interval {
+            sleep(interval - elapsed);
+        }
+    }
+
+    if frames.is_empty() {
+        return Err(ApiError::new(
+            ErrorCode::CaptureFailed,
+            "No frames captured during recording.",
+        ));
+    }
+
+    let frame_count = frames.len() as u32;
+    let (w, h) = (frames[0].width(), frames[0].height());
+    let mut file_size_bytes = None;
+    let saved_path_buf;
+
+    match destination {
+        OutputDestination::Directory(ref dir) => {
+            if !dir.exists() {
+                fs::create_dir_all(dir).map_err(|e| {
+                    ApiError::new(
+                        ErrorCode::SaveFailed,
+                        format!("Failed to create output directory: {e}"),
+                    )
+                })?;
+            }
+            for (idx, frame) in frames.iter().enumerate() {
+                let filename = format!("frame_{:04}.png", idx + 1);
+                let frame_path = dir.join(filename);
+                output::save_image(
+                    frame,
+                    &OutputDestination::File(frame_path),
+                    ImageFormat::Png,
+                    None,
+                )?;
+            }
+            saved_path_buf = dir.clone();
+            if !args.quiet && !args.json {
+                println!(
+                    "Recorded {} frames saved to directory: {}",
+                    frame_count,
+                    dir.display()
+                );
+            }
+        }
+        _ => {
+            let gif_dest = match destination {
+                OutputDestination::File(p) => p,
+                _ => {
+                    let filename = output::generate_default_filename(ImageFormat::Gif);
+                    PathBuf::from(filename)
+                }
+            };
+            output::save_animated_gif(&frames, fps, &gif_dest)?;
+            if let Ok(meta) = fs::metadata(&gif_dest) {
+                file_size_bytes = Some(meta.len());
+            }
+            if !args.quiet && !args.json {
+                println!("Recording saved as animated GIF: {}", gif_dest.display());
+            }
+            saved_path_buf = gif_dest;
+        }
+    }
+
+    if args.json {
+        let rec_json = RecordResultJson {
+            status: "success".to_string(),
+            path: saved_path_buf.display().to_string(),
+            frame_count,
+            duration_secs: start_time.elapsed().as_secs_f32(),
+            fps,
+            width: w,
+            height: h,
+            size_bytes: file_size_bytes,
+        };
+        print_json_success(rec_json)?;
     }
 
     Ok(())

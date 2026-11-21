@@ -127,7 +127,29 @@ pub fn capture_window_with_details(
     query: &str,
     region: Option<&Region>,
 ) -> Result<CapturedWindow, CaptureError> {
-    let img = capture_window(query)?;
+    let windows = get_windows()?;
+    let target = find_window(&windows, query)?;
+
+    let is_minimized = target.is_minimized().unwrap_or(false);
+    let title = target.title().unwrap_or_else(|_| "Untitled".to_string());
+    let id = target.id().unwrap_or(0);
+
+    if is_minimized {
+        return Err(CaptureError::WindowMinimized(id, title));
+    }
+
+    let win_x = target.x().unwrap_or(0);
+    let win_y = target.y().unwrap_or(0);
+
+    debug!(
+        "Capturing window id={}, title={:?}, origin=({}, {})",
+        id, title, win_x, win_y
+    );
+    let raw = target
+        .capture_image()
+        .map_err(CaptureError::WindowCaptureFailed)?;
+    let img = DynamicImage::ImageRgba8(raw);
+
     let scale_factor = get_monitors()
         .ok()
         .and_then(|m| m.first().and_then(|mon| mon.scale_factor().ok()))
@@ -163,12 +185,14 @@ pub fn capture_window_with_details(
             image: DynamicImage::ImageRgba8(cropped),
             scale_factor,
             crop_offset: (rx, ry),
+            window_origin: (win_x, win_y),
         })
     } else {
         Ok(CapturedWindow {
             image: img,
             scale_factor,
             crop_offset: (0, 0),
+            window_origin: (win_x, win_y),
         })
     }
 }

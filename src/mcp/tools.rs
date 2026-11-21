@@ -7,6 +7,7 @@ use crate::doctor;
 use crate::mcp::base64::{base64_decode, base64_encode};
 use crate::mcp::types::{ToolCallResult, ToolContent, ToolDefinition};
 use crate::output::{self, OutputDestination};
+use crate::transform;
 
 pub fn json_tool_result<T: serde::Serialize>(val: &T) -> ToolCallResult {
     match serde_json::to_string_pretty(val) {
@@ -158,8 +159,71 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "waitIntervalMs": {
                         "type": "integer",
                         "description": "Optional polling interval in milliseconds between change detection checks (default: 100)."
+                    },
+                    "cursor": {
+                        "type": "boolean",
+                        "description": "Optional flag to capture and render mouse cursor arrow onto the screenshot."
+                    },
+                    "highlightCursor": {
+                        "type": "boolean",
+                        "description": "Optional flag to highlight mouse cursor with a vivid amber focus ring."
                     }
                 },
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: "record_screen".to_string(),
+            description: "Continuously record screen or window over a specified duration into an animated GIF or sequence of frames.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "durationSecs": {
+                        "type": "number",
+                        "description": "Duration in seconds to record (e.g. 1.0 to 30.0)."
+                    },
+                    "fps": {
+                        "type": "integer",
+                        "description": "Sampling framerate (1 to 30 FPS, default: 5)."
+                    },
+                    "monitor": {
+                        "type": "integer",
+                        "description": "0-indexed monitor index. If omitted and window is omitted, records primary display."
+                    },
+                    "window": {
+                        "type": "string",
+                        "description": "Optional window ID or title substring to record."
+                    },
+                    "allMonitors": {
+                        "type": "boolean",
+                        "description": "Optional flag to record multi-monitor panorama."
+                    },
+                    "cursor": {
+                        "type": "boolean",
+                        "description": "Optional flag to capture and render mouse cursor."
+                    },
+                    "highlightCursor": {
+                        "type": "boolean",
+                        "description": "Optional flag to highlight mouse cursor with amber focus ring."
+                    },
+                    "outputPath": {
+                        "type": "string",
+                        "description": "Optional output path for animated GIF file."
+                    },
+                    "returnBase64": {
+                        "type": "boolean",
+                        "description": "Whether to return the animated GIF base64 data in the response. Defaults to true if outputPath is omitted."
+                    },
+                    "scale": {
+                        "type": "number",
+                        "description": "Optional downscale factor between 0.01 and 1.0."
+                    },
+                    "maxDimension": {
+                        "type": "integer",
+                        "description": "Optional maximum dimension in pixels."
+                    }
+                },
+                "required": ["durationSecs"],
                 "additionalProperties": false
             }),
         },
@@ -200,6 +264,7 @@ pub fn execute_tool_call(name: &str, arguments: &serde_json::Value) -> ToolCallR
             json_tool_result(&report)
         }
         "capture_screen" => execute_capture_tool(arguments),
+        "record_screen" => execute_record_tool(arguments),
         _ => ToolCallResult {
             content: vec![ToolContent::Text {
                 text: format!("Unknown tool name: '{name}'"),
@@ -378,6 +443,14 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .get("waitIntervalMs")
         .and_then(|v| v.as_u64())
         .unwrap_or(100);
+    let cursor_flag = arguments
+        .get("cursor")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let highlight_cursor_flag = arguments
+        .get("highlightCursor")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let diff_with_str = arguments.get("diffWith").and_then(|v| v.as_str());
 
     let mut manual_masks = Vec::new();
@@ -533,7 +606,14 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
                 }
             };
             capture::capture_window_with_details(win_query, region.as_ref())
-                .map(|c| (c.image, c.scale_factor, c.crop_offset, None))
+                .map(|c| {
+                    (
+                        c.image,
+                        c.scale_factor,
+                        c.crop_offset,
+                        Some(c.window_origin),
+                    )
+                })
                 .map_err(|e| format!("Window capture failed: {e}"))
         } else {
             capture::capture_screen_with_details(monitor, region.as_ref(), coords)
@@ -594,6 +674,25 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
                 };
             }
         }
+    };
+
+    let global_cursor = capture::get_global_cursor_position();
+    let cursor_info = capture::resolve_cursor_on_canvas(
+        global_cursor,
+        monitor_origin.unwrap_or((0, 0)),
+        scale_factor,
+        crop_offset,
+        (image.width(), image.height()),
+    );
+
+    let image = if cursor_flag || highlight_cursor_flag {
+        if let Some(ref c) = cursor_info {
+            transform::draw_cursor_overlay(image, c.x, c.y, highlight_cursor_flag)
+        } else {
+            image
+        }
+    } else {
+        image
     };
 
     let image = if !manual_masks.is_empty() || !window_masks.is_empty() {
@@ -746,15 +845,22 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
             ImageFormat::Png => "image/png",
             ImageFormat::Jpeg => "image/jpeg",
             ImageFormat::Webp => "image/webp",
+            ImageFormat::Gif => "image/gif",
         };
 
         content.push(ToolContent::Image {
             data: b64,
             mime_type: mime_type.to_string(),
         });
+        let cursor_desc = if let Some(c) = cursor_info {
+            format!(" [Cursor: x={}, y={}, visible={}]", c.x, c.y, c.visible)
+        } else {
+            String::new()
+        };
+
         content.push(ToolContent::Text {
             text: format!(
-                "Captured {}x{} image ({:?}, {} bytes)",
+                "Captured {}x{} image ({:?}, {} bytes){cursor_desc}",
                 image.width(),
                 image.height(),
                 format,
@@ -768,3 +874,5 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         is_error: false,
     }
 }
+
+pub use crate::mcp::record::execute_record_tool;

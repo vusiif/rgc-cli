@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
 
-use crate::cli::ImageFormat;
+pub use crate::cli::ImageFormat;
 
 // Re-export API and Transform modules so all existing output::* call sites remain 100% compatible
 pub use crate::api::*;
@@ -198,6 +198,7 @@ pub fn validate_and_infer_format(
                 "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
                 "webp" => Some(ImageFormat::Webp),
                 "png" => Some(ImageFormat::Png),
+                "gif" => Some(ImageFormat::Gif),
                 _ => None,
             };
 
@@ -232,6 +233,7 @@ pub fn infer_format(path: Option<&Path>, explicit_format: Option<ImageFormat>) -
                 "jpg" | "jpeg" => return ImageFormat::Jpeg,
                 "webp" => return ImageFormat::Webp,
                 "png" => return ImageFormat::Png,
+                "gif" => return ImageFormat::Gif,
                 _ => {}
             }
         }
@@ -285,6 +287,11 @@ pub fn encode_image_bytes(
         ImageFormat::Webp => {
             image
                 .write_to(&mut buffer, image::ImageFormat::WebP)
+                .map_err(OutputError::StdoutFailed)?;
+        }
+        ImageFormat::Gif => {
+            image
+                .write_to(&mut buffer, image::ImageFormat::Gif)
                 .map_err(OutputError::StdoutFailed)?;
         }
         ImageFormat::Jpeg => {
@@ -417,6 +424,7 @@ pub fn save_image(
             ImageFormat::Png => image::ImageFormat::Png,
             ImageFormat::Jpeg => image::ImageFormat::Jpeg,
             ImageFormat::Webp => image::ImageFormat::WebP,
+            ImageFormat::Gif => image::ImageFormat::Gif,
         };
 
         image
@@ -467,6 +475,55 @@ pub fn open_file_in_viewer(path: &Path) -> Result<(), OutputError> {
             .arg(&*target_str)
             .spawn()
             .map_err(|e| OutputError::OpenViewerFailed(e.to_string()))?;
+    }
+
+    Ok(())
+}
+
+/// Save a sequence of image frames into an animated GIF file.
+pub fn save_animated_gif(
+    frames: &[DynamicImage],
+    fps: u32,
+    path: &Path,
+) -> Result<(), OutputError> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    use image::{Delay, Frame};
+
+    if frames.is_empty() {
+        return Err(OutputError::InvalidPath(
+            "Cannot encode animated GIF: frame buffer is empty".to_string(),
+        ));
+    }
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| OutputError::CreateDirFailed {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+    }
+
+    let file = fs::File::create(path).map_err(|e| OutputError::SaveFailed {
+        path: path.to_path_buf(),
+        source: image::ImageError::IoError(e),
+    })?;
+
+    let mut encoder = GifEncoder::new(file);
+    let _ = encoder.set_repeat(Repeat::Infinite);
+
+    let delay_ms = (1000 / fps.max(1)).max(10);
+    let delay = Delay::from_numer_denom_ms(delay_ms, 1);
+
+    for frame in frames {
+        let rgba = frame.to_rgba8();
+        let gif_frame = Frame::from_parts(rgba, 0, 0, delay);
+        encoder
+            .encode_frame(gif_frame)
+            .map_err(|e| OutputError::SaveFailed {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
     }
 
     Ok(())
@@ -610,5 +667,16 @@ mod tests {
             "Clipboard copy should succeed: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_save_animated_gif() {
+        let f1 = DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 16, Rgba([255, 0, 0, 255])));
+        let f2 = DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 16, Rgba([0, 255, 0, 255])));
+        let target = PathBuf::from("temp_anim_test.gif");
+        let res = save_animated_gif(&[f1, f2], 5, &target);
+        assert!(res.is_ok());
+        assert!(target.exists());
+        let _ = fs::remove_file(target);
     }
 }

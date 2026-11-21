@@ -1,9 +1,62 @@
+use std::collections::HashSet;
+use std::sync::Mutex;
+
 use crate::capture;
 use crate::cli::{CoordMode, ImageFormat};
 use crate::doctor;
 use crate::mcp::base64::base64_encode;
-use crate::mcp::types::{JsonRpcError, ResourceContent, ResourceReadResult};
+use crate::mcp::types::{JsonRpcError, JsonRpcNotification, ResourceContent, ResourceReadResult};
 use crate::output;
+
+static SUBSCRIPTIONS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// Retrieve all currently subscribed resource URIs.
+pub fn get_subscriptions() -> Vec<String> {
+    let mut guard = SUBSCRIPTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let set = guard.get_or_insert_with(HashSet::new);
+    set.iter().cloned().collect()
+}
+
+/// Subscribe a resource URI for live change notifications.
+pub fn subscribe_resource(uri: &str) -> bool {
+    let mut guard = SUBSCRIPTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let set = guard.get_or_insert_with(HashSet::new);
+    set.insert(uri.to_string())
+}
+
+/// Unsubscribe a resource URI from live change notifications.
+pub fn unsubscribe_resource(uri: &str) -> bool {
+    let mut guard = SUBSCRIPTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let set = guard.get_or_insert_with(HashSet::new);
+    set.remove(uri)
+}
+
+/// Clear all active resource subscriptions.
+pub fn clear_subscriptions() {
+    let mut guard = SUBSCRIPTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let set = guard.get_or_insert_with(HashSet::new);
+    set.clear();
+}
+
+/// Create a JSON-RPC notification for an updated resource.
+pub fn create_resource_updated_notification(uri: &str) -> String {
+    let notif = JsonRpcNotification {
+        jsonrpc: "2.0",
+        method: "notifications/resources/updated".to_string(),
+        params: Some(serde_json::json!({ "uri": uri })),
+    };
+    serde_json::to_string(&notif).unwrap_or_default()
+}
+
+/// Create a JSON-RPC notification when the list of available resources has changed.
+pub fn create_resource_list_changed_notification() -> String {
+    let notif = JsonRpcNotification {
+        jsonrpc: "2.0",
+        method: "notifications/resources/list_changed".to_string(),
+        params: None::<serde_json::Value>,
+    };
+    serde_json::to_string(&notif).unwrap_or_default()
+}
 
 pub fn image_to_blob_resource(
     uri: &str,

@@ -69,7 +69,7 @@ Options:
       --output-dir <DIR>      Explicit output directory destination (timestamped filename generated inside)
   -c, --clipboard             Copy screenshot directly to system clipboard
   -d, --delay <MS>            Delay before capturing in milliseconds (e.g. 1000 for 1 second)
-  -f, --format <FORMAT>       Output image format. If omitted, inferred from file extension [possible values: png, jpeg, webp]
+  -f, --format <FORMAT>       Output image format. If omitted, inferred from file extension [possible values: png, jpeg, webp, gif]
       --scale <FACTOR>        Downscale image by a factor between 0.01 and 1.0 (e.g. 0.5 for half resolution)
       --max-dimension <PX>    Constrain maximum width or height to PX pixels, preserving aspect ratio
       --quality <1-100>       Compression quality for JPEG output (1-100, defaults to 85)
@@ -83,6 +83,10 @@ Options:
       --wait-change           Wait for screen/window visual change before capturing (ideal for UI automation)
       --wait-timeout <MS>     Maximum timeout in ms to wait for a visual change before capturing (default: 5000)
       --wait-interval <MS>    Polling interval in ms between change detection checks (default: 100)
+      --cursor                Capture and render mouse cursor on the screenshot
+      --highlight-cursor      Render a prominent visual highlight ring around the mouse cursor
+      --record <SECS>         Continuously sample and record screen over SECONDS duration (saved as animated GIF or image sequence)
+      --fps <1-30>            Sampling framerate (FPS, 1-30) for continuous recording (default: 5)
       --open                  Open captured screenshot file with system default viewer
       --completions <SHELL>   Generate shell completion script to stdout [possible values: bash, elvish, fish, powershell, zsh]
       --json                  Output result as structured JSON (ideal for automation & AI agents)
@@ -355,20 +359,43 @@ Output:
 }
 ```
 
+#### 21. Mouse Cursor Capture & Focus Halo Ring
+```bash
+# Capture screenshot with visible mouse cursor
+rgc-cli --cursor -o shot_with_cursor.png
+
+# Highlight mouse cursor position with an amber focus halo ring (ideal for GUI tutorials & AI grounding)
+rgc-cli --highlight-cursor -o shot_highlighted.png
+```
+
+#### 22. Continuous Screen Recording to Animated GIF & Image Sequences
+```bash
+# Record screen for 3 seconds at 10 FPS into an animated GIF
+rgc-cli --record 3.0 --fps 10 -o recording.gif
+
+# Record specific window with cursor highlight and save frames into a directory
+rgc-cli -w "Code" --record 5.0 --fps 5 --cursor --output-dir ./record_frames/
+```
+
 ---
 
 ## 🤖 Model Context Protocol (MCP) Integration
 
-`rgc-cli` natively acts as an MCP stdio server conforming to JSON-RPC 2.0. This allows AI coding agents (Claude Desktop, Cursor, Cline, Roo Code, Windsurf) to directly take screenshots and inspect displays.
+`rgc-cli` natively acts as an MCP stdio server conforming to JSON-RPC 2.0. This allows AI coding agents (Claude Desktop, Cursor, Cline, Roo Code, Windsurf) to directly take screenshots, record screen activity, subscribe to visual changes, and inspect displays.
 
 ### Exposed MCP Tools
 
 1. **`list_monitors`**: Enumerate all connected screens, resolutions, and DPI scale factors.
-2. **`capture_screen`**: Capture screen, window, stitched multi-monitor panorama, or cropped region with direct base64 image payload (`image/png`, `image/webp`, `image/jpeg`) or output file.
-   - Arguments: `monitor` (int/str), `window` (int/str), `allMonitors` (bool, multi-screen panorama), `region` (string `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"`), `scale` (number `0.01..1.0`), `maxDimension` (int `>0`), `quality` (int `1..100`), `grid` (int, pixel step), `diffWith` (string, path or Base64), `diffThreshold` (int, 0..255), `cropChanged` (bool), `redactions` (array: `["100,100,200,200:blur"]` or `[{"region":"100,100,200,200","effect":"transparent"}]`), `maskWindows` (array: `["1Password", "WeChat:blur"]`), `outputPath` (string), `returnBase64` (bool).
-3. **`doctor`**: Diagnostic check of display subsystem, active backend, and clipboard capabilities.
+2. **`list_windows`**: Enumerate all active application windows, titles, IDs, and positions.
+3. **`capture_screen`**: Capture screen, window, stitched multi-monitor panorama, or cropped region with direct base64 image payload (`image/png`, `image/webp`, `image/jpeg`, `image/gif`) or output file.
+   - Arguments: `monitor` (int), `window` (string), `allMonitors` (bool), `region` (string `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"` | `"gif"`), `scale` (number `0.01..1.0`), `maxDimension` (int `>0`), `quality` (int `1..100`), `grid` (int, pixel step), `diffWith` (string, path or Base64), `diffThreshold` (int, 0..255), `cropChanged` (bool), `highlightDiff` (bool), `timestamp` (bool), `tag` (string), `waitChange` (bool), `waitTimeoutMs` (int), `waitIntervalMs` (int), `cursor` (bool), `highlightCursor` (bool), `redactions` (array), `maskWindows` (array), `outputPath` (string), `returnBase64` (bool).
+4. **`record_screen`**: Continuously record screen, window, or panorama over a specified duration into an animated GIF or sequence of frames.
+   - Arguments: `durationSecs` (number, required), `fps` (int, 1..30, default 5), `monitor` (int), `window` (string), `allMonitors` (bool), `cursor` (bool), `highlightCursor` (bool), `scale` (number), `maxDimension` (int), `outputPath` (string), `returnBase64` (bool).
+5. **`doctor`**: Diagnostic check of display subsystem, active backend, and clipboard capabilities.
 
-### Exposed MCP Resources
+### Exposed MCP Resources & Subscriptions
+
+`rgc-cli` supports active resource subscriptions (`resources/subscribe` & `resources/unsubscribe`) and live change push notifications (`notifications/resources/updated`):
 
 1. **`screen://current`**: Live snapshot of the primary display (`image/png` binary blob).
 2. **`screen://all`**: Live panorama snapshot of all connected displays stitched together (`image/png` binary blob).

@@ -106,6 +106,15 @@ impl<T> ApiResponse<T> {
     }
 }
 
+/// Structured information about the mouse cursor location on the captured image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorInfo {
+    pub x: i32,
+    pub y: i32,
+    pub visible: bool,
+}
+
 /// Structured JSON representation of the capture operation result.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -121,4 +130,21 @@ pub struct CaptureResultJson {
     pub size_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff: Option<DiffResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<CursorInfo>,
+}
+
+/// Structured JSON representation of the continuous recording result.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordResultJson {
+    pub status: String,
+    pub path: String,
+    pub frame_count: u32,
+    pub duration_secs: f32,
+    pub fps: u32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
 }

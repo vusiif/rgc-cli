@@ -171,4 +171,5 @@ pub struct CapturedWindow {
     pub image: DynamicImage,
     pub scale_factor: f32,
     pub crop_offset: (u32, u32),
+    pub window_origin: (i32, i32),
 }
