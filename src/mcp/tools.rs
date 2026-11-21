@@ -179,66 +179,19 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "somMaxElements": {
                         "type": "integer",
                         "description": "Optional maximum number of UI elements to detect and mark (default: 50)."
+                    },
+                    "clickAt": {
+                        "description": "Optional click target coordinate(s) in 'X,Y' or 'X,Y,LABEL' format (string or array of strings) to overlay visual ripple and target indicators."
+                    },
+                    "drag": {
+                        "description": "Optional drag trajectory coordinate(s) in 'X1,Y1,X2,Y2' or 'X1,Y1,X2,Y2,LABEL' format (string or array of strings) to overlay directional dashed trajectory arrows."
                     }
                 },
                 "additionalProperties": false
             }),
         },
-        ToolDefinition {
-            name: "record_screen".to_string(),
-            description: "Continuously record screen or window over a specified duration into an animated GIF or sequence of frames.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "durationSecs": {
-                        "type": "number",
-                        "description": "Duration in seconds to record (e.g. 1.0 to 30.0)."
-                    },
-                    "fps": {
-                        "type": "integer",
-                        "description": "Sampling framerate (1 to 30 FPS, default: 5)."
-                    },
-                    "monitor": {
-                        "type": "integer",
-                        "description": "0-indexed monitor index. If omitted and window is omitted, records primary display."
-                    },
-                    "window": {
-                        "type": "string",
-                        "description": "Optional window ID or title substring to record."
-                    },
-                    "allMonitors": {
-                        "type": "boolean",
-                        "description": "Optional flag to record multi-monitor panorama."
-                    },
-                    "cursor": {
-                        "type": "boolean",
-                        "description": "Optional flag to capture and render mouse cursor."
-                    },
-                    "highlightCursor": {
-                        "type": "boolean",
-                        "description": "Optional flag to highlight mouse cursor with amber focus ring."
-                    },
-                    "outputPath": {
-                        "type": "string",
-                        "description": "Optional output path for animated GIF file."
-                    },
-                    "returnBase64": {
-                        "type": "boolean",
-                        "description": "Whether to return the animated GIF base64 data in the response. Defaults to true if outputPath is omitted."
-                    },
-                    "scale": {
-                        "type": "number",
-                        "description": "Optional downscale factor between 0.01 and 1.0."
-                    },
-                    "maxDimension": {
-                        "type": "integer",
-                        "description": "Optional maximum dimension in pixels."
-                    }
-                },
-                "required": ["durationSecs"],
-                "additionalProperties": false
-            }),
-        },
+        crate::mcp::record::get_record_tool_definition(),
+        crate::mcp::action::get_verify_action_tool_definition(),
         ToolDefinition {
             name: "doctor".to_string(),
             description: "Run hardware, display, and environment diagnostics to check screen capture availability.".to_string(),
@@ -277,6 +230,7 @@ pub fn execute_tool_call(name: &str, arguments: &serde_json::Value) -> ToolCallR
         }
         "capture_screen" => execute_capture_tool(arguments),
         "record_screen" => execute_record_tool(arguments),
+        "verify_action" => execute_verify_action_tool(arguments),
         _ => ToolCallResult {
             content: vec![ToolContent::Text {
                 text: format!("Unknown tool name: '{name}'"),
@@ -476,6 +430,60 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .and_then(|v| v.as_u64())
         .unwrap_or(50) as usize;
     let diff_with_str = arguments.get("diffWith").and_then(|v| v.as_str());
+
+    // Validate and preload reference diff image early to fail fast before capture
+    let preloaded_diff_ref = if let Some(diff_str) = diff_with_str {
+        let trimmed = diff_str.trim();
+        let ref_image = if trimmed.starts_with("data:image/")
+            || (!trimmed.contains('/') && !trimmed.contains('\\') && trimmed.len() > 100)
+        {
+            let raw_b64 = if let Some((_, rest)) = trimmed.split_once(";base64,") {
+                rest
+            } else {
+                trimmed
+            };
+            match base64_decode(raw_b64) {
+                Ok(bytes) => match image::load_from_memory(&bytes) {
+                    Ok(img) => img,
+                    Err(e) => {
+                        return ToolCallResult {
+                            content: vec![ToolContent::Text {
+                                text: format!(
+                                    "Failed to decode diff reference image from memory: {e}"
+                                ),
+                            }],
+                            is_error: true,
+                        };
+                    }
+                },
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!("Invalid base64 in 'diffWith': {e}"),
+                        }],
+                        is_error: true,
+                    };
+                }
+            }
+        } else {
+            match image::open(Path::new(trimmed)) {
+                Ok(img) => img,
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!(
+                                "Failed to open diff reference image from '{trimmed}': {e}"
+                            ),
+                        }],
+                        is_error: true,
+                    };
+                }
+            }
+        };
+        Some(ref_image)
+    } else {
+        None
+    };
 
     let mut manual_masks = Vec::new();
     if let Some(redacts_val) = arguments.get("redactions") {
@@ -744,56 +752,8 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let mut image = output::apply_image_transforms(image, scale, max_dimension);
 
     let mut diff_summary = None;
-    if let Some(diff_str) = diff_with_str {
-        let trimmed = diff_str.trim();
-        let ref_image = if trimmed.starts_with("data:image/")
-            || (!trimmed.contains('/') && !trimmed.contains('\\') && trimmed.len() > 100)
-        {
-            let raw_b64 = if let Some((_, rest)) = trimmed.split_once(";base64,") {
-                rest
-            } else {
-                trimmed
-            };
-            match base64_decode(raw_b64) {
-                Ok(bytes) => match image::load_from_memory(&bytes) {
-                    Ok(img) => img,
-                    Err(e) => {
-                        return ToolCallResult {
-                            content: vec![ToolContent::Text {
-                                text: format!(
-                                    "Failed to decode diff reference image from memory: {e}"
-                                ),
-                            }],
-                            is_error: true,
-                        };
-                    }
-                },
-                Err(e) => {
-                    return ToolCallResult {
-                        content: vec![ToolContent::Text {
-                            text: format!("Invalid base64 in 'diffWith': {e}"),
-                        }],
-                        is_error: true,
-                    };
-                }
-            }
-        } else {
-            match image::open(Path::new(trimmed)) {
-                Ok(img) => img,
-                Err(e) => {
-                    return ToolCallResult {
-                        content: vec![ToolContent::Text {
-                            text: format!(
-                                "Failed to open diff reference image from '{trimmed}': {e}"
-                            ),
-                        }],
-                        is_error: true,
-                    };
-                }
-            }
-        };
-
-        let diff = output::calculate_image_diff(&image, &ref_image, diff_threshold);
+    if let Some(ref ref_image) = preloaded_diff_ref {
+        let diff = output::calculate_image_diff(&image, ref_image, diff_threshold);
         if crop_changed {
             if let Some(ref bbox) = diff.bbox {
                 image = output::crop_to_diff_bbox(image, bbox, 8);
@@ -832,6 +792,69 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
     } else {
         None
     };
+
+    // Action overlays: click ripples and drag trajectories
+    let mut parsed_clicks = Vec::new();
+    if let Some(clicks_val) = arguments.get("clickAt") {
+        if let Some(s) = clicks_val.as_str() {
+            match crate::action::parse_click_marker(s) {
+                Ok(m) => parsed_clicks.push(m),
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text { text: e }],
+                        is_error: true,
+                    };
+                }
+            }
+        } else if let Some(arr) = clicks_val.as_array() {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    match crate::action::parse_click_marker(s) {
+                        Ok(m) => parsed_clicks.push(m),
+                        Err(e) => {
+                            return ToolCallResult {
+                                content: vec![ToolContent::Text { text: e }],
+                                is_error: true,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut parsed_drags = Vec::new();
+    if let Some(drags_val) = arguments.get("drag") {
+        if let Some(s) = drags_val.as_str() {
+            match crate::action::parse_drag_marker(s) {
+                Ok(m) => parsed_drags.push(m),
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text { text: e }],
+                        is_error: true,
+                    };
+                }
+            }
+        } else if let Some(arr) = drags_val.as_array() {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    match crate::action::parse_drag_marker(s) {
+                        Ok(m) => parsed_drags.push(m),
+                        Err(e) => {
+                            return ToolCallResult {
+                                content: vec![ToolContent::Text { text: e }],
+                                is_error: true,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !parsed_clicks.is_empty() || !parsed_drags.is_empty() {
+        image = crate::action::draw_action_overlays(image, &parsed_clicks, &parsed_drags);
+    }
 
     let mut content = Vec::new();
 
@@ -920,4 +943,5 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
     }
 }
 
+pub use crate::mcp::action::execute_verify_action_tool;
 pub use crate::mcp::record::execute_record_tool;

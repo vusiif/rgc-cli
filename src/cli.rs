@@ -203,7 +203,8 @@ pub struct Cli {
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
             "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
             "cursor", "highlight_cursor", "record", "fps",
-            "som", "som_threshold", "som_max_elements"
+            "som", "som_threshold", "som_max_elements",
+            "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
         ]
     )]
     pub doctor: bool,
@@ -218,7 +219,8 @@ pub struct Cli {
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
             "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
             "cursor", "highlight_cursor", "record", "fps",
-            "som", "som_threshold", "som_max_elements"
+            "som", "som_threshold", "som_max_elements",
+            "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
         ]
     )]
     pub mcp: bool,
@@ -232,7 +234,8 @@ pub struct Cli {
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
-            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval"
+            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
+            "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
         ]
     )]
     pub list_monitors: bool,
@@ -245,7 +248,8 @@ pub struct Cli {
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
-            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval"
+            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
+            "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
         ]
     )]
     pub list_windows: bool,
@@ -260,7 +264,8 @@ pub struct Cli {
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "format", "json", "open", "mask", "mask_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
-            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval"
+            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
+            "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
         ]
     )]
     pub completions: Option<clap_complete::Shell>,
@@ -465,6 +470,30 @@ pub struct Cli {
     /// Maximum number of UI elements to detect and mark (default: 50)
     #[arg(long = "som-max-elements", value_name = "COUNT", default_value_t = 50)]
     pub som_max_elements: usize,
+
+    /// Overlay a visual click ripple and target indicator at coordinate X,Y (e.g. 500,300 or 500,300,submit)
+    #[arg(long = "click-at", value_name = "X,Y[,LABEL]", action = clap::ArgAction::Append)]
+    pub click_at: Vec<String>,
+
+    /// Overlay a visual drag trajectory arrow between coordinates (e.g. 100,200,400,500 or 100,200,400,500,swipe)
+    #[arg(long = "drag", value_name = "X1,Y1,X2,Y2[,LABEL]", action = clap::ArgAction::Append)]
+    pub drag: Vec<String>,
+
+    /// Verify whether a visual change occurred within a radius around X,Y after interaction
+    #[arg(long = "verify-click", value_name = "X,Y")]
+    pub verify_click: Option<String>,
+
+    /// Search radius in pixels around interaction coordinate for change verification (default: 100, 0 for full screen)
+    #[arg(long = "verify-radius", value_name = "PIXELS", default_value_t = 100)]
+    pub verify_radius: u32,
+
+    /// Wait duration in milliseconds before sampling follow-up state for verification (default: 500 ms)
+    #[arg(long = "verify-timeout", value_name = "MS", default_value_t = 500)]
+    pub verify_timeout: u64,
+
+    /// Color difference threshold (1-255, default: 10) for action change verification
+    #[arg(long = "verify-threshold", value_name = "1-255", default_value_t = 10)]
+    pub verify_threshold: u8,
 
     /// Open captured screenshot file with system default viewer
     #[arg(
@@ -936,5 +965,35 @@ mod tests {
 
         // SoM conflict with doctor
         assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--som"]).is_err());
+
+        // Phase 11.2: Action overlays & Verification options
+        let cli_action = Cli::try_parse_from([
+            "rgc-cli",
+            "--click-at",
+            "500,300",
+            "--click-at",
+            "600,400,btn",
+            "--drag",
+            "100,200,300,400,drag_label",
+            "--verify-click",
+            "500,300",
+            "--verify-radius",
+            "150",
+            "--verify-timeout",
+            "800",
+            "--verify-threshold",
+            "15",
+        ])
+        .unwrap();
+        assert_eq!(cli_action.click_at.len(), 2);
+        assert_eq!(cli_action.drag.len(), 1);
+        assert_eq!(cli_action.verify_click, Some("500,300".to_string()));
+        assert_eq!(cli_action.verify_radius, 150);
+        assert_eq!(cli_action.verify_timeout, 800);
+        assert_eq!(cli_action.verify_threshold, 15);
+
+        // Action conflict with doctor
+        assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--click-at", "100,100"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--verify-click", "100,100"]).is_err());
     }
 }

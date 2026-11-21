@@ -34,7 +34,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libwayland-dev libpipewire-0.3-dev libspa-0.2-dev libegl1-mesa-dev libgbm-dev libdrm-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev
+          sudo apt-get install -y pkg-config libwayland-dev libpipewire-0.3-dev libspa-0.2-dev libegl1-mesa-dev libgbm-dev libdrm-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev xvfb
 
       - name: Check code formatting
         run: cargo fmt --all -- --check
@@ -43,4 +43,9 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests (pure logic & headless)
-        run: cargo test --verbose
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            xvfb-run -a cargo test --verbose
+          else
+            cargo test --verbose
+          fi

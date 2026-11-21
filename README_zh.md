@@ -90,6 +90,12 @@ cargo build --release
       --som                   自动检测可交互 UI 控件并叠加 Set-of-Mark (SoM) 编号徽标
       --som-threshold <1-100> 控件边缘检测灵敏度阈值 (默认 25)
       --som-max-elements <N>  最大标注控件元素数量 (默认 50)
+      --click-at <X,Y[,L]>    在截图标注点击波纹扩散环与目标靶心 (格式: X,Y 或 X,Y,标签)
+      --drag <X1,Y1,X2,Y2[,L]> 在截图标注拖拽/手势轨迹虚线与导向箭头
+      --verify-click <X,Y>    验证交互后指定坐标半径区域内是否发生真实界面视觉变动
+      --verify-radius <PX>    交互效果验证检测半径 (默认 100 像素，0 为全屏)
+      --verify-timeout <MS>   二次采样等待超时毫秒数 (默认 500 毫秒)
+      --verify-threshold <N>  交互变动检测色差阈值 (1-255，默认 10)
       --open                  截图保存后自动调用系统默认查看器打开
       --completions <SHELL>   生成终端 Tab 自动补全脚本到 stdout [可选: bash, elvish, fish, powershell, zsh]
       --json                  以结构化 JSON 格式输出结果 (非常适合自动化与 AI 智能体)
@@ -405,6 +411,38 @@ rgc-cli --som --json -o som_marked.png
 }
 ```
 
+#### 24. 交互操作视觉轨迹叠加与局部响应验证
+```bash
+# 在指定坐标 (500,300) 绘制点击同心波纹与靶心标记
+rgc-cli --click-at 500,300 -o click_trace.png
+
+# 标注从 (100,200) 到 (400,500) 的拖拽滑动手势方向箭头与轨迹虚线
+rgc-cli --drag 100,200,400,500,swipe_left -o drag_trace.png
+
+# 验证点击 (500,300) 后其 100px 半径范围内是否真实产生界面响应
+rgc-cli --verify-click 500,300 --verify-timeout 500 --json -o verified.png
+```
+输出：
+```json
+{
+  "ok": true,
+  "data": {
+    "status": "success",
+    "path": "verified.png",
+    "actionVerification": {
+      "verified": true,
+      "targetX": 500,
+      "targetY": 300,
+      "radius": 100,
+      "changedPixels": 420,
+      "changePercent": 1.34,
+      "threshold": 10,
+      "bbox": { "x": 480, "y": 290, "width": 40, "height": 22 }
+    }
+  }
+}
+```
+
 ---
 
 ## 🤖 Model Context Protocol (MCP) 智能体集成
@@ -416,10 +454,12 @@ rgc-cli --som --json -o som_marked.png
 1. **`list_monitors`**: 枚举所有屏幕、分辨率与 DPI 缩放系数。
 2. **`list_windows`**: 枚举所有活动应用窗口的标题、ID 及坐标尺寸。
 3. **`capture_screen`**: 捕获指定屏幕、窗口、全景多屏或局部区域，支持直接返回 Base64 编码图片数据（`image/png`, `image/webp`, `image/jpeg`, `image/gif`）或落盘至本地文件。
-   - 参数：`monitor` (整数/字符串), `window` (窗口 ID/标题), `allMonitors` (布尔值，多屏全景拼接), `region` (字符串 `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"` | `"gif"`), `scale` (浮点数 `0.01..1.0`), `maxDimension` (最大像素 `>0`), `quality` (压缩质量 `1..100`), `grid` (网格步长整数), `diffWith` (历史图像路径或 Base64 字符串), `diffThreshold` (像素容差阈值 0-255), `cropChanged` (布尔值), `highlightDiff` (布尔值), `timestamp` (布尔值), `tag` (字符串), `waitChange` (布尔值), `waitTimeoutMs` (整数), `waitIntervalMs` (整数), `cursor` (布尔值), `highlightCursor` (布尔值), `som` (布尔值), `somThreshold` (整数), `somMaxElements` (整数), `redactions` (数组), `maskWindows` (数组), `outputPath` (字符串), `returnBase64` (布尔值)。
+   - 参数：`monitor` (整数/字符串), `window` (窗口 ID/标题), `allMonitors` (布尔值，多屏全景拼接), `region` (字符串 `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"` | `"gif"`), `scale` (浮点数 `0.01..1.0`), `maxDimension` (最大像素 `>0`), `quality` (压缩质量 `1..100`), `grid` (网格步长整数), `diffWith` (历史图像路径或 Base64 字符串), `diffThreshold` (像素容差阈值 0-255), `cropChanged` (布尔值), `highlightDiff` (布尔值), `timestamp` (布尔值), `tag` (字符串), `waitChange` (布尔值), `waitTimeoutMs` (整数), `waitIntervalMs` (整数), `cursor` (布尔值), `highlightCursor` (布尔值), `som` (布尔值), `somThreshold` (整数), `somMaxElements` (整数), `clickAt` (字符串或数组), `drag` (字符串或数组), `redactions` (数组), `maskWindows` (数组), `outputPath` (字符串), `returnBase64` (布尔值)。
 4. **`record_screen`**: 连续录制屏幕、窗口或全景多屏指定秒数，编码为动画 GIF 或连续序列帧。
    - 参数：`durationSecs` (浮点数，必填), `fps` (整数 1..30，默认 5), `monitor` (整数), `window` (字符串), `allMonitors` (布尔值), `cursor` (布尔值), `highlightCursor` (布尔值), `scale` (浮点数), `maxDimension` (整数), `outputPath` (字符串), `returnBase64` (布尔值)。
-5. **`doctor`**: 诊断检查当前图形显示子系统与捕获就绪状态。
+5. **`verify_action`**: 采样交互前后的界面状态，局部校验 (x, y) 半径范围内是否发生真实的界面变动。返回验证结果、变动像素统计、外接矩形以及带点击波纹标注的截图。
+   - 参数：`x` (整数，必填), `y` (整数，必填), `radius` (整数，默认 100), `timeoutMs` (整数，默认 500), `threshold` (整数，默认 10), `monitor` (整数), `window` (字符串), `outputPath` (字符串), `returnBase64` (布尔值)。
+6. **`doctor`**: 诊断检查当前图形显示子系统与捕获就绪状态。
 
 ### 提供的 MCP 资源 (Resources) 与变动主动订阅
 

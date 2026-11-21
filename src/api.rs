@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::action::{ActionVerificationResult, ClickMarker, DragMarker};
 use crate::cli::ImageFormat;
 use crate::transform::DiffResult;
 
@@ -147,6 +148,12 @@ pub struct CaptureResultJson {
     pub cursor: Option<CursorInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elements: Option<Vec<UiElement>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_verification: Option<ActionVerificationResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clicks: Option<Vec<ClickMarker>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drags: Option<Vec<DragMarker>>,
 }
 
 /// Structured JSON representation of the continuous recording result.

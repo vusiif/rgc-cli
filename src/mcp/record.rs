@@ -3,9 +3,68 @@ use std::path::Path;
 use crate::capture;
 use crate::cli::CoordMode;
 use crate::mcp::base64::base64_encode;
-use crate::mcp::types::{ToolCallResult, ToolContent};
+use crate::mcp::types::{ToolCallResult, ToolContent, ToolDefinition};
 use crate::output;
 use crate::transform;
+
+/// Returns the MCP tool definition for `record_screen`.
+pub fn get_record_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "record_screen".to_string(),
+        description: "Continuously record screen frames over a specified duration and encode them into an animated GIF or sequence of images.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "durationSecs": {
+                    "type": "number",
+                    "description": "Duration in seconds to record (e.g. 1.0 to 30.0)."
+                },
+                "fps": {
+                    "type": "integer",
+                    "description": "Sampling framerate (1 to 30 FPS, default: 5)."
+                },
+                "monitor": {
+                    "type": "integer",
+                    "description": "0-indexed monitor index. If omitted and window is omitted, records primary display."
+                },
+                "window": {
+                    "type": "string",
+                    "description": "Optional window ID or title substring to record."
+                },
+                "allMonitors": {
+                    "type": "boolean",
+                    "description": "Optional flag to record multi-monitor panorama."
+                },
+                "cursor": {
+                    "type": "boolean",
+                    "description": "Optional flag to capture and render mouse cursor."
+                },
+                "highlightCursor": {
+                    "type": "boolean",
+                    "description": "Optional flag to highlight mouse cursor with amber focus ring."
+                },
+                "outputPath": {
+                    "type": "string",
+                    "description": "Optional output path for animated GIF file."
+                },
+                "returnBase64": {
+                    "type": "boolean",
+                    "description": "Whether to return the animated GIF base64 data in the response. Defaults to true if outputPath is omitted."
+                },
+                "scale": {
+                    "type": "number",
+                    "description": "Optional downscale factor between 0.01 and 1.0."
+                },
+                "maxDimension": {
+                    "type": "integer",
+                    "description": "Optional maximum dimension in pixels."
+                }
+            },
+            "required": ["durationSecs"],
+            "additionalProperties": false
+        }),
+    }
+}
 
 /// Execute the `record_screen` MCP tool, sampling consecutive frames and encoding them as an animated GIF.
 pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {

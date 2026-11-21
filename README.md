@@ -90,6 +90,12 @@ Options:
       --som                   Detect interactive UI elements and overlay Set-of-Mark (SoM) numbered badges for AI navigation
       --som-threshold <1-100> Sensitivity threshold for UI element detection (default: 25)
       --som-max-elements <N>  Maximum number of UI elements to detect and mark (default: 50)
+      --click-at <X,Y[,L]>    Overlay a visual click ripple and target indicator at coordinate X,Y
+      --drag <X1,Y1,X2,Y2[,L]> Overlay a visual drag trajectory arrow between coordinates
+      --verify-click <X,Y>    Verify whether a visual change occurred within a radius around X,Y after interaction
+      --verify-radius <PX>    Search radius in pixels for action verification (default: 100, 0 for full screen)
+      --verify-timeout <MS>   Wait duration in milliseconds before sampling follow-up state (default: 500 ms)
+      --verify-threshold <N>  Color difference threshold (1-255, default: 10) for action change verification
       --open                  Open captured screenshot file with system default viewer
       --completions <SHELL>   Generate shell completion script to stdout [possible values: bash, elvish, fish, powershell, zsh]
       --json                  Output result as structured JSON (ideal for automation & AI agents)
@@ -405,6 +411,38 @@ Output:
 }
 ```
 
+#### 24. Action Feedback Overlays & Localized Interaction Verification
+```bash
+# Overlay visual click ripple marker with target crosshairs at coordinate 500,300
+rgc-cli --click-at 500,300 -o click_trace.png
+
+# Overlay drag & drop trajectory arrow from (100,200) to (400,500)
+rgc-cli --drag 100,200,400,500,swipe_left -o drag_trace.png
+
+# Verify whether clicking (500,300) actually caused a UI change within 100px radius
+rgc-cli --verify-click 500,300 --verify-timeout 500 --json -o verified.png
+```
+Output:
+```json
+{
+  "ok": true,
+  "data": {
+    "status": "success",
+    "path": "verified.png",
+    "actionVerification": {
+      "verified": true,
+      "targetX": 500,
+      "targetY": 300,
+      "radius": 100,
+      "changedPixels": 420,
+      "changePercent": 1.34,
+      "threshold": 10,
+      "bbox": { "x": 480, "y": 290, "width": 40, "height": 22 }
+    }
+  }
+}
+```
+
 ---
 
 ## 🤖 Model Context Protocol (MCP) Integration
@@ -416,10 +454,12 @@ Output:
 1. **`list_monitors`**: Enumerate all connected screens, resolutions, and DPI scale factors.
 2. **`list_windows`**: Enumerate all active application windows, titles, IDs, and positions.
 3. **`capture_screen`**: Capture screen, window, stitched multi-monitor panorama, or cropped region with direct base64 image payload (`image/png`, `image/webp`, `image/jpeg`, `image/gif`) or output file.
-   - Arguments: `monitor` (int), `window` (string), `allMonitors` (bool), `region` (string `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"` | `"gif"`), `scale` (number `0.01..1.0`), `maxDimension` (int `>0`), `quality` (int `1..100`), `grid` (int, pixel step), `diffWith` (string, path or Base64), `diffThreshold` (int, 0..255), `cropChanged` (bool), `highlightDiff` (bool), `timestamp` (bool), `tag` (string), `waitChange` (bool), `waitTimeoutMs` (int), `waitIntervalMs` (int), `cursor` (bool), `highlightCursor` (bool), `som` (bool), `somThreshold` (int), `somMaxElements` (int), `redactions` (array), `maskWindows` (array), `outputPath` (string), `returnBase64` (bool).
+   - Arguments: `monitor` (int), `window` (string), `allMonitors` (bool), `region` (string `"x,y,w,h"`), `coords` (`"logical"` | `"physical"`), `format` (`"png"` | `"jpeg"` | `"webp"` | `"gif"`), `scale` (number `0.01..1.0`), `maxDimension` (int `>0`), `quality` (int `1..100`), `grid` (int, pixel step), `diffWith` (string, path or Base64), `diffThreshold` (int, 0..255), `cropChanged` (bool), `highlightDiff` (bool), `timestamp` (bool), `tag` (string), `waitChange` (bool), `waitTimeoutMs` (int), `waitIntervalMs` (int), `cursor` (bool), `highlightCursor` (bool), `som` (bool), `somThreshold` (int), `somMaxElements` (int), `clickAt` (string | string[]), `drag` (string | string[]), `redactions` (array), `maskWindows` (array), `outputPath` (string), `returnBase64` (bool).
 4. **`record_screen`**: Continuously record screen, window, or panorama over a specified duration into an animated GIF or sequence of frames.
    - Arguments: `durationSecs` (number, required), `fps` (int, 1..30, default 5), `monitor` (int), `window` (string), `allMonitors` (bool), `cursor` (bool), `highlightCursor` (bool), `scale` (number), `maxDimension` (int), `outputPath` (string), `returnBase64` (bool).
-5. **`doctor`**: Diagnostic check of display subsystem, active backend, and clipboard capabilities.
+5. **`verify_action`**: Capture screen state before and after an interaction, verifying whether a localized visual UI change occurred within a radius around (x, y). Returns verification status, changed pixel stats, bounding box, and an annotated screenshot with click ripple feedback.
+   - Arguments: `x` (int, required), `y` (int, required), `radius` (int, default 100), `timeoutMs` (int, default 500), `threshold` (int, default 10), `monitor` (int), `window` (string), `outputPath` (string), `returnBase64` (bool).
+6. **`doctor`**: Diagnostic check of display subsystem, active backend, and clipboard capabilities.
 
 ### Exposed MCP Resources & Subscriptions
 

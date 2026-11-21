@@ -261,7 +261,7 @@ fn get_glyph_3x5(ch: char) -> Option<&'static [u8; 5]> {
 
 /// Alpha-blends a source pixel over the destination image at (x, y).
 #[inline]
-fn blend_pixel(img: &mut image::RgbaImage, x: u32, y: u32, src: image::Rgba<u8>) {
+pub(crate) fn blend_pixel(img: &mut image::RgbaImage, x: u32, y: u32, src: image::Rgba<u8>) {
     if x >= img.width() || y >= img.height() {
         return;
     }

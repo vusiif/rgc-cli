@@ -1,3 +1,4 @@
+pub mod action;
 pub mod base64;
 pub mod prompts;
 pub mod record;
@@ -716,10 +717,21 @@ mod tests {
         let res = handle_mcp_message(tools_req).unwrap();
         assert!(res.contains("record_screen"));
         assert!(res.contains("capture_screen"));
+        assert!(res.contains("verify_action"));
         assert!(res.contains("cursor"));
         assert!(res.contains("highlightCursor"));
         assert!(res.contains("som"));
         assert!(res.contains("somThreshold"));
         assert!(res.contains("somMaxElements"));
+        assert!(res.contains("clickAt"));
+        assert!(res.contains("drag"));
+    }
+
+    #[test]
+    fn test_handle_mcp_tool_call_verify_action_missing_coords() {
+        let req = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"verify_action","arguments":{}}}"#;
+        let res = handle_mcp_message(req).unwrap();
+        assert!(res.contains(r#""isError":true"#));
+        assert!(res.contains("Missing or invalid 'x' coordinate parameter"));
     }
 }

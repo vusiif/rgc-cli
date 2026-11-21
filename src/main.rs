@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod action;
 pub mod api;
 pub mod capture;
 pub mod cli;
@@ -305,8 +306,43 @@ fn run(args: Cli) -> Result<(), ApiError> {
         }
     }
 
-    // 4. Perform capture (with optional wait-change detection loop)
-    let raw_captured = if args.wait_change {
+    // 4. Perform capture (with optional verify-click or wait-change detection loop)
+    let (raw_captured, action_verification) = if let Some(ref verify_str) = args.verify_click {
+        let click_marker = action::parse_click_marker(verify_str).map_err(|e| {
+            ApiError::new(ErrorCode::BadArgs, e)
+                .with_stage("verify_click_parsing")
+                .with_suggestion("Ensure --verify-click is passed in 'X,Y' or 'X,Y,LABEL' format.")
+        })?;
+
+        if !args.quiet && !args.json {
+            if is_stdout {
+                eprintln!(
+                    "Verifying action at ({}, {}) within radius {}px (timeout: {} ms)...",
+                    click_marker.x, click_marker.y, args.verify_radius, args.verify_timeout
+                );
+            } else {
+                println!(
+                    "Verifying action at ({}, {}) within radius {}px (timeout: {} ms)...",
+                    click_marker.x, click_marker.y, args.verify_radius, args.verify_timeout
+                );
+            }
+        }
+
+        let baseline = capture_target(&args)?;
+        sleep(Duration::from_millis(args.verify_timeout));
+        let follow_up = capture_target(&args)?;
+
+        let verification = action::verify_action_change(
+            &baseline.image,
+            &follow_up.image,
+            click_marker.x,
+            click_marker.y,
+            args.verify_radius,
+            args.verify_threshold,
+        );
+
+        (follow_up, Some((click_marker, verification)))
+    } else if args.wait_change {
         let mut baseline = capture_target(&args)?;
         let start_time = std::time::Instant::now();
         let timeout = Duration::from_millis(args.wait_timeout);
@@ -356,9 +392,9 @@ fn run(args: Cli) -> Result<(), ApiError> {
             );
         }
 
-        baseline
+        (baseline, None)
     } else {
-        capture_target(&args)?
+        (capture_target(&args)?, None)
     };
 
     let dynamic_image = raw_captured.image;
@@ -475,6 +511,57 @@ fn run(args: Cli) -> Result<(), ApiError> {
         None
     };
 
+    // 4.6 Parse and draw click markers and drag trajectories
+    let mut clicks = Vec::new();
+    for c_str in &args.click_at {
+        let c = action::parse_click_marker(c_str).map_err(|e| {
+            ApiError::new(ErrorCode::BadArgs, e)
+                .with_stage("click_at_parsing")
+                .with_suggestion("Ensure --click-at is formatted as 'X,Y' or 'X,Y,LABEL'.")
+        })?;
+        clicks.push(c);
+    }
+
+    let mut drags = Vec::new();
+    for d_str in &args.drag {
+        let d = action::parse_drag_marker(d_str).map_err(|e| {
+            ApiError::new(ErrorCode::BadArgs, e)
+                .with_stage("drag_parsing")
+                .with_suggestion(
+                    "Ensure --drag is formatted as 'X1,Y1,X2,Y2' or 'X1,Y1,X2,Y2,LABEL'.",
+                )
+        })?;
+        drags.push(d);
+    }
+
+    let action_verification_result =
+        if let Some((verify_click_marker, verification)) = action_verification {
+            if !clicks
+                .iter()
+                .any(|c| c.x == verify_click_marker.x && c.y == verify_click_marker.y)
+            {
+                clicks.push(action::ClickMarker {
+                    x: verify_click_marker.x,
+                    y: verify_click_marker.y,
+                    label: Some(
+                        if verification.verified {
+                            "ACTION OK"
+                        } else {
+                            "NO CHANGE"
+                        }
+                        .to_string(),
+                    ),
+                });
+            }
+            Some(verification)
+        } else {
+            None
+        };
+
+    if !clicks.is_empty() || !drags.is_empty() {
+        dynamic_image = action::draw_action_overlays(dynamic_image, &clicks, &drags);
+    }
+
     let img_width = dynamic_image.width();
     let img_height = dynamic_image.height();
 
@@ -517,6 +604,12 @@ fn run(args: Cli) -> Result<(), ApiError> {
                     elems.len()
                 );
             }
+            if let Some(ref ver) = action_verification_result {
+                println!(
+                    "Action Verification: verified={} ({} pixels changed in ROI, {:.2}%), bbox={:?}",
+                    ver.verified, ver.changed_pixels, ver.change_percent, ver.bbox
+                );
+            }
         }
 
         if args.open {
@@ -539,6 +632,13 @@ fn run(args: Cli) -> Result<(), ApiError> {
             diff: diff_result,
             cursor: cursor_info,
             elements: detected_elements,
+            action_verification: action_verification_result,
+            clicks: if clicks.is_empty() {
+                None
+            } else {
+                Some(clicks)
+            },
+            drags: if drags.is_empty() { None } else { Some(drags) },
         };
         print_json_success(result_payload)?;
     }
