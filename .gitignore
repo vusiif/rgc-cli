@@ -1,3 +1,9 @@
 /target
 .idea/
 *.png
+
+# Exclude root markdown docs except public READMEs and CHANGELOG
+/*.md
+!/README*.md
+!/CHANGELOG.md
+
