@@ -228,7 +228,7 @@ pub struct Cli {
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
             "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
             "cursor", "highlight_cursor", "record", "fps",
-            "som", "som_threshold", "som_max_elements", "accessibility",
+            "som", "som_threshold", "som_max_elements", "accessibility", "find_template",
             "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
         ]
     )]
@@ -244,7 +244,7 @@ pub struct Cli {
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
             "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
             "cursor", "highlight_cursor", "record", "fps",
-            "som", "som_threshold", "som_max_elements", "accessibility",
+            "som", "som_threshold", "som_max_elements", "accessibility", "find_template",
             "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
         ]
     )]
@@ -513,6 +513,22 @@ pub struct Cli {
     /// Fuse UI automation accessibility tree semantics (role, label, state) with Set-of-Mark detections
     #[arg(long = "accessibility", visible_alias = "a11y")]
     pub accessibility: bool,
+
+    /// Locate a template or icon image on the screen and return its exact coordinates
+    #[arg(long = "find-template", value_name = "IMAGE_PATH")]
+    pub find_template: Option<std::path::PathBuf>,
+
+    /// Minimum confidence threshold for template matching (0.0-1.0, default: 0.85)
+    #[arg(long = "template-threshold", value_name = "0.0-1.0", default_value_t = 0.85)]
+    pub template_threshold: f32,
+
+    /// Maximum number of matching template occurrences to locate (default: 1)
+    #[arg(long = "template-max-matches", value_name = "COUNT", default_value_t = 1)]
+    pub template_max_matches: usize,
+
+    /// Overlay visual bounding box and confidence score badges onto matched template locations
+    #[arg(long = "highlight-template", requires = "find_template")]
+    pub highlight_template: bool,
 
     /// Overlay a visual click ripple and target indicator at coordinate X,Y (e.g. 500,300 or 500,300,submit)
     #[arg(long = "click-at", value_name = "X,Y[,LABEL]", action = clap::ArgAction::Append)]
@@ -952,6 +968,29 @@ mod tests {
         assert!(Cli::try_parse_from(["rgc-cli", "--benchmark", "--record", "2"]).is_err());
         // Conflict: --exclude-window and --window
         assert!(Cli::try_parse_from(["rgc-cli", "-w", "Code", "--exclude-window", "Terminal"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parsing_template_options() {
+        let cli = Cli::try_parse_from([
+            "rgc-cli",
+            "--find-template",
+            "icon.png",
+            "--template-threshold",
+            "0.92",
+            "--template-max-matches",
+            "3",
+            "--highlight-template",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.find_template, Some(std::path::PathBuf::from("icon.png")));
+        assert!((cli.template_threshold - 0.92).abs() < 1e-4);
+        assert_eq!(cli.template_max_matches, 3);
+        assert!(cli.highlight_template);
+
+        // Missing required: --highlight-template requires --find-template
+        assert!(Cli::try_parse_from(["rgc-cli", "--highlight-template"]).is_err());
     }
 
     #[test]

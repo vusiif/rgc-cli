@@ -614,6 +614,8 @@ mod tests {
         assert!(resp.contains("diffWith"));
         assert!(resp.contains("diffThreshold"));
         assert!(resp.contains("cropChanged"));
+        assert!(resp.contains("findTemplate"));
+        assert!(resp.contains("find_template"));
     }
 
     #[test]
@@ -834,5 +836,21 @@ mod tests {
         let resp3 = handle_mcp_message(req3).expect("response expected");
         assert!(resp3.contains(r#""isError":true"#));
         assert!(resp3.contains("Session capture failed") || resp3.contains("No window found"));
+    }
+
+    #[test]
+    fn test_handle_mcp_tool_call_find_template_missing_template() {
+        let req = r#"{"jsonrpc":"2.0","id":60,"method":"tools/call","params":{"name":"find_template","arguments":{}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""isError":true"#));
+        assert!(resp.contains("Missing or empty required parameter 'template'"));
+    }
+
+    #[test]
+    fn test_handle_mcp_tool_call_find_template_invalid_base64() {
+        let req = r#"{"jsonrpc":"2.0","id":61,"method":"tools/call","params":{"name":"find_template","arguments":{"template":"data:image/png;base64,invalid!@#$"}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""isError":true"#));
+        assert!(resp.contains("Invalid base64 in 'template'"));
     }
 }

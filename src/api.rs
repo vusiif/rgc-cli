@@ -213,6 +213,56 @@ impl UiElement {
     }
 }
 
+/// Result of visual template/icon matching across image and screen coordinate spaces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateMatchResult {
+    /// 0-based image X coordinate (top-left).
+    pub x: u32,
+    /// 0-based image Y coordinate (top-left).
+    pub y: u32,
+    /// Match rectangle width in image pixels.
+    pub width: u32,
+    /// Match rectangle height in image pixels.
+    pub height: u32,
+    /// Center X coordinate on the image.
+    pub center_x: u32,
+    /// Center Y coordinate on the image.
+    pub center_y: u32,
+    /// Normalized cross-correlation confidence score (0.0 - 1.0).
+    pub confidence: f32,
+    /// Global OS desktop screen center X coordinate for direct automation clicks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_center_x: Option<i32>,
+    /// Global OS desktop screen center Y coordinate for direct automation clicks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_center_y: Option<i32>,
+    /// Global OS desktop screen top-left X coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_x: Option<i32>,
+    /// Global OS desktop screen top-left Y coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_y: Option<i32>,
+}
+
+impl TemplateMatchResult {
+    pub fn new(x: u32, y: u32, width: u32, height: u32, confidence: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            center_x: x + width / 2,
+            center_y: y + height / 2,
+            confidence,
+            screen_center_x: None,
+            screen_center_y: None,
+            screen_x: None,
+            screen_y: None,
+        }
+    }
+}
+
 /// Structured JSON representation of the capture operation result.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -240,6 +290,8 @@ pub struct CaptureResultJson {
     pub drags: Option<Vec<DragMarker>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coordinates: Option<CoordinateSpaceInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matches: Option<Vec<TemplateMatchResult>>,
 }
 
 /// Structured JSON representation of the continuous recording result.

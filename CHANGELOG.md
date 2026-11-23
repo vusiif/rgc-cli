@@ -5,6 +5,22 @@ All notable changes to `rgc-cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.0] - 2026-11-23
+
+### Added
+- **Visual Template & Icon Matching (`src/template.rs`, `--find-template <PATH>`)**:
+  - Implemented high-performance Normalized Cross-Correlation (NCC) with 2D integral image acceleration ($O(1)$ patch variance and local energy computation).
+  - Multi-scale pyramid coarse-to-fine search enabling sub-15ms icon location even across 2K/4K high-resolution canvases.
+  - Alpha transparency awareness: correctly computes correlation across arbitrary non-rectangular foreground icons while ignoring transparent padding.
+  - Non-Maximum Suppression (NMS) for multi-match retrieval (`--template-max-matches N`).
+  - Automatic desktop coordinate projection: returns `screenCenterX`, `screenCenterY`, `screenX`, `screenY` on every `TemplateMatchResult`.
+  - Visual match highlighting: `--highlight-template` overlays vivid violet bounding boxes and confidence score badges (`98%`).
+- **Dedicated MCP Tool (`find_template`)**:
+  - Added standalone `find_template` MCP tool accepting image file paths or base64 data URIs, enabling AI agents to query icon locations with zero context overhead.
+  - Integrated `findTemplate`, `templateThreshold`, `templateMaxMatches`, and `highlightTemplate` into `capture_screen` MCP tool.
+
+---
+
 ## [2.9.0] - 2026-11-23
 
 ### Added

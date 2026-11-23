@@ -13,6 +13,7 @@ pub mod mcp;
 pub mod output;
 pub mod pipeline;
 pub mod som;
+pub mod template;
 pub mod transform;
 
 use clap::Parser;
@@ -494,6 +495,28 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
         None
     };
 
+    let template_match = if let Some(ref tpl_path) = args.find_template {
+        let tpl_img = image::open(tpl_path).map_err(|e| {
+            ApiError::new(
+                ErrorCode::BadArgs,
+                format!(
+                    "Failed to open template image '{}': {e}",
+                    tpl_path.display()
+                ),
+            )
+            .with_stage("template_matching")
+            .with_suggestion("Ensure the path points to a valid image file (PNG, JPG, WebP).")
+        })?;
+        Some(template::TemplateMatchOptions {
+            template: tpl_img,
+            threshold: args.template_threshold,
+            max_matches: args.template_max_matches,
+            highlight: args.highlight_template,
+        })
+    } else {
+        None
+    };
+
     let pipeline_options = pipeline::PipelineOptions {
         cursor: args.cursor,
         highlight_cursor: args.highlight_cursor,
@@ -516,6 +539,7 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
         som_max_elements: args.som_max_elements,
         accessibility: args.accessibility,
         a11y_nodes_override: None,
+        template_match,
         clicks,
         drags,
         global_cursor_override: None,
@@ -533,6 +557,7 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
     let cursor_info = pipeline_result.cursor;
     let diff_result = pipeline_result.diff;
     let detected_elements = pipeline_result.elements;
+    let template_matches = pipeline_result.matches;
     let clicks = pipeline_result.clicks.unwrap_or_default();
     let drags = pipeline_result.drags.unwrap_or_default();
     let coordinates_info = Some(pipeline_result.coordinates);
@@ -579,6 +604,22 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
                     elems.len()
                 );
             }
+            if let Some(ref matches) = template_matches {
+                if !matches.is_empty() {
+                    println!("Template Matches: found {} occurrences", matches.len());
+                    for (idx, m) in matches.iter().enumerate() {
+                        let scx = m.screen_center_x.map(|v| v.to_string()).unwrap_or_else(|| "N/A".to_string());
+                        let scy = m.screen_center_y.map(|v| v.to_string()).unwrap_or_else(|| "N/A".to_string());
+                        println!(
+                            "  [{}] ({}, {}) {}x{} (conf: {:.1}%) -> Screen Click: ({}, {})",
+                            idx + 1, m.x, m.y, m.width, m.height, m.confidence * 100.0,
+                            scx, scy
+                        );
+                    }
+                } else {
+                    println!("Template Matches: no match found above threshold {:.2}", args.template_threshold);
+                }
+            }
             if let Some(ref ver) = action_verification_result {
                 println!(
                     "Action Verification: verified={} ({} pixels changed in ROI, {:.2}%), bbox={:?}",
@@ -615,6 +656,7 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
             },
             drags: if drags.is_empty() { None } else { Some(drags) },
             coordinates: coordinates_info,
+            matches: template_matches,
         };
         print_json_success(result_payload)?;
     }

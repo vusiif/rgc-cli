@@ -49,6 +49,7 @@ pub struct PipelineOptions {
     pub som_max_elements: usize,
     pub accessibility: bool,
     pub a11y_nodes_override: Option<Vec<crate::accessibility::AccessibilityNode>>,
+    pub template_match: Option<crate::template::TemplateMatchOptions>,
     pub clicks: Vec<ClickMarker>,
     pub drags: Vec<DragMarker>,
     /// Optional cursor position override (useful for deterministic tests).
@@ -62,6 +63,7 @@ pub struct PipelineResult {
     pub cursor: Option<CursorInfo>,
     pub diff: Option<DiffResult>,
     pub elements: Option<Vec<UiElement>>,
+    pub matches: Option<Vec<crate::api::TemplateMatchResult>>,
     pub clicks: Option<Vec<ClickMarker>>,
     pub drags: Option<Vec<DragMarker>>,
     pub transform: CoordinateTransform,
@@ -279,6 +281,25 @@ pub fn execute_image_pipeline(
         None
     };
 
+    // Stage 8c: Visual template/icon matching
+    let template_matches = if let Some(ref tpl_opts) = options.template_match {
+        let mut matches = crate::template::find_template_matches(
+            &rgba,
+            &tpl_opts.template,
+            tpl_opts.threshold,
+            tpl_opts.max_matches,
+        );
+        crate::template::enrich_matches_with_coordinates(&mut matches, &transform);
+
+        if tpl_opts.highlight {
+            crate::template::draw_template_matches_in_place(&mut rgba, &matches);
+        }
+
+        Some(matches)
+    } else {
+        None
+    };
+
     // Stage 9: Action markers (clicks and drags)
     let clicks = if !options.clicks.is_empty() {
         Some(options.clicks.clone())
@@ -320,6 +341,7 @@ pub fn execute_image_pipeline(
         cursor: final_cursor,
         diff: diff_result,
         elements: detected_elements,
+        matches: template_matches,
         clicks,
         drags,
         transform,
@@ -563,6 +585,37 @@ mod tests {
         let injected = elems.iter().find(|e| e.role.as_deref() == Some("Button")).unwrap();
         assert_eq!(injected.label.as_deref(), Some("OK"));
         assert_eq!(injected.source.as_deref(), Some("accessibility"));
+    }
+
+    #[test]
+    fn test_execute_image_pipeline_template_matching() {
+        let mut raw_rgba = image::RgbaImage::new(200, 200);
+        let mut icon = image::RgbaImage::new(12, 12);
+        for (x, y, p) in icon.enumerate_pixels_mut() {
+            *p = image::Rgba([100, 150, (x * 20) as u8, 255]);
+            raw_rgba.put_pixel(60 + x, 40 + y, *p);
+        }
+
+        let mut options = PipelineOptions::default();
+        options.template_match = Some(crate::template::TemplateMatchOptions {
+            template: DynamicImage::ImageRgba8(icon),
+            threshold: 0.90,
+            max_matches: 1,
+            highlight: true,
+        });
+
+        let result = execute_image_pipeline(DynamicImage::ImageRgba8(raw_rgba), 1.0, (0, 0), Some((100, 200)), &options)
+            .expect("Template match pipeline should succeed");
+
+        assert!(result.matches.is_some());
+        let matches = result.matches.unwrap();
+        assert_eq!(matches.len(), 1);
+        let m = &matches[0];
+        assert_eq!(m.x, 60);
+        assert_eq!(m.y, 40);
+        // Screen center: origin (100, 200) + center (60 + 6, 40 + 6) = (166, 246)
+        assert_eq!(m.screen_center_x, Some(166));
+        assert_eq!(m.screen_center_y, Some(246));
     }
 
     #[test]

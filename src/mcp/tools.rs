@@ -211,6 +211,22 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                         "items": { "type": "string" },
                         "description": "Optional list of window titles or patterns to exclude and blackout completely from capture."
                     },
+                    "findTemplate": {
+                        "type": "string",
+                        "description": "Optional file path or base64 data URI of a template/icon image to locate on the screenshot."
+                    },
+                    "templateThreshold": {
+                        "type": "number",
+                        "description": "Optional minimum confidence threshold (0.0-1.0, default: 0.85) for template matching."
+                    },
+                    "templateMaxMatches": {
+                        "type": "integer",
+                        "description": "Optional maximum number of matching occurrences to return (default: 1)."
+                    },
+                    "highlightTemplate": {
+                        "type": "boolean",
+                        "description": "Optional flag to highlight found template matches with bounding boxes and confidence score badges."
+                    },
                     "clickAt": {
                         "description": "Optional click target coordinate(s) in 'X,Y' or 'X,Y,LABEL' format (string or array of strings) to overlay visual ripple and target indicators."
                     },
@@ -229,6 +245,37 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: "find_template".to_string(),
+            description: "Locate a visual template or icon on the active screen or window and return its exact desktop coordinates and confidence score.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "template": {
+                        "type": "string",
+                        "description": "Required file path or base64 data URI of the target template/icon image to locate."
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": "Optional minimum confidence score in range 0.0-1.0 (default: 0.85)."
+                    },
+                    "maxMatches": {
+                        "type": "integer",
+                        "description": "Optional maximum number of matching occurrences to return (default: 1)."
+                    },
+                    "monitor": {
+                        "type": "integer",
+                        "description": "Optional 0-indexed monitor index to search within."
+                    },
+                    "window": {
+                        "type": "string",
+                        "description": "Optional window title or ID to search within."
+                    }
+                },
+                "required": ["template"],
                 "additionalProperties": false
             }),
         },
@@ -264,6 +311,7 @@ pub fn execute_tool_call(name: &str, arguments: &serde_json::Value) -> ToolCallR
         "record_screen" => execute_record_tool(arguments),
         "verify_action" => execute_verify_action_tool(arguments),
         "capture_session" => execute_capture_session_tool(arguments),
+        "find_template" => execute_find_template_tool(arguments),
         _ => ToolCallResult {
             content: vec![ToolContent::Text {
                 text: format!("Unknown tool name: '{name}'"),
@@ -637,6 +685,66 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         None
     };
 
+    let find_template_str = arguments.get("findTemplate").and_then(|v| v.as_str());
+    let template_threshold = arguments.get("templateThreshold").and_then(|v| v.as_f64()).unwrap_or(0.85) as f32;
+    let template_max_matches = arguments.get("templateMaxMatches").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+    let highlight_template = arguments.get("highlightTemplate").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let preloaded_template_match = if let Some(tpl_str) = find_template_str {
+        let trimmed = tpl_str.trim();
+        let tpl_image = if trimmed.starts_with("data:image/")
+            || (!trimmed.contains('/') && !trimmed.contains('\\') && trimmed.len() > 100)
+        {
+            let raw_b64 = if let Some((_, rest)) = trimmed.split_once(";base64,") {
+                rest
+            } else {
+                trimmed
+            };
+            match base64_decode(raw_b64) {
+                Ok(bytes) => match image::load_from_memory(&bytes) {
+                    Ok(img) => img,
+                    Err(e) => {
+                        return ToolCallResult {
+                            content: vec![ToolContent::Text {
+                                text: format!("Failed to decode template image from memory: {e}"),
+                            }],
+                            is_error: true,
+                        };
+                    }
+                },
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!("Invalid base64 in 'findTemplate': {e}"),
+                        }],
+                        is_error: true,
+                    };
+                }
+            }
+        } else {
+            match image::open(Path::new(trimmed)) {
+                Ok(img) => img,
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!("Failed to open template image from '{trimmed}': {e}"),
+                        }],
+                        is_error: true,
+                    };
+                }
+            }
+        };
+
+        Some(crate::template::TemplateMatchOptions {
+            template: tpl_image,
+            threshold: template_threshold,
+            max_matches: template_max_matches,
+            highlight: highlight_template,
+        })
+    } else {
+        None
+    };
+
     let mut manual_masks = Vec::new();
     if let Some(redacts_val) = arguments.get("redactions") {
         if let Some(arr) = redacts_val.as_array() {
@@ -904,6 +1012,7 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         som_max_elements,
         accessibility: accessibility_flag,
         a11y_nodes_override: None,
+        template_match: preloaded_template_match,
         clicks: parsed_clicks,
         drags: parsed_drags,
         global_cursor_override: None,
@@ -946,6 +1055,14 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         if let Ok(elems_json) = serde_json::to_string_pretty(elems) {
             content.push(ToolContent::Text {
                 text: format!("Detected UI Elements (Set-of-Mark):\n{elems_json}"),
+            });
+        }
+    }
+
+    if let Some(ref matches) = pipeline_result.matches {
+        if let Ok(matches_json) = serde_json::to_string_pretty(matches) {
+            content.push(ToolContent::Text {
+                text: format!("Template Matches:\n{matches_json}"),
             });
         }
     }
@@ -1018,6 +1135,137 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
     ToolCallResult {
         content,
         is_error: false,
+    }
+}
+
+pub fn execute_find_template_tool(arguments: &serde_json::Value) -> ToolCallResult {
+    let tpl_str = match arguments.get("template").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim(),
+        _ => {
+            return ToolCallResult {
+                content: vec![ToolContent::Text {
+                    text: "Missing or empty required parameter 'template'".to_string(),
+                }],
+                is_error: true,
+            };
+        }
+    };
+
+    let threshold = arguments
+        .get("threshold")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.85) as f32;
+    let max_matches = arguments
+        .get("maxMatches")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1) as usize;
+    let monitor = arguments
+        .get("monitor")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let window_query = arguments.get("window").and_then(|v| v.as_str());
+
+    // Load template image (base64 or file path)
+    let tpl_img = if tpl_str.starts_with("data:image/")
+        || (!tpl_str.contains('/') && !tpl_str.contains('\\') && tpl_str.len() > 100)
+    {
+        let raw_b64 = if let Some((_, rest)) = tpl_str.split_once(";base64,") {
+            rest
+        } else {
+            tpl_str
+        };
+        match base64_decode(raw_b64) {
+            Ok(bytes) => match image::load_from_memory(&bytes) {
+                Ok(img) => img,
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!("Failed to decode template image from memory: {e}"),
+                        }],
+                        is_error: true,
+                    };
+                }
+            },
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Invalid base64 in 'template': {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        }
+    } else {
+        match image::open(Path::new(tpl_str)) {
+            Ok(img) => img,
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Failed to open template image from '{tpl_str}': {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        }
+    };
+
+    // Capture screen or window
+    let captured = if let Some(win_q) = window_query {
+        match capture::capture_window_with_details(win_q, None) {
+            Ok(c) => (c.image, c.scale_factor, c.crop_offset, c.window_origin),
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Failed to capture window '{win_q}': {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        }
+    } else {
+        match capture::capture_screen_with_details(monitor, None, CoordMode::Physical) {
+            Ok(c) => (c.image, c.scale_factor, c.crop_offset, c.monitor_origin),
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Failed to capture screen: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        }
+    };
+
+    let (image, scale_factor, crop_offset, origin) = captured;
+    let rgba = image.into_rgba8();
+    let img_w = rgba.width();
+    let img_h = rgba.height();
+
+    let mut matches = crate::template::find_template_matches(&rgba, &tpl_img, threshold, max_matches);
+    let transform = crate::coords::CoordinateTransform::new(
+        origin,
+        scale_factor,
+        crop_offset,
+        1.0,
+        (0, 0),
+        (img_w, img_h),
+        (img_w, img_h),
+    );
+    crate::template::enrich_matches_with_coordinates(&mut matches, &transform);
+
+    match serde_json::to_string_pretty(&matches) {
+        Ok(json_str) => ToolCallResult {
+            content: vec![ToolContent::Text {
+                text: format!("Template Matches:\n{json_str}"),
+            }],
+            is_error: false,
+        },
+        Err(e) => ToolCallResult {
+            content: vec![ToolContent::Text {
+                text: format!("Failed to serialize match results: {e}"),
+            }],
+            is_error: true,
+        },
     }
 }
 
