@@ -7,7 +7,6 @@ use crate::doctor;
 use crate::mcp::base64::{base64_decode, base64_encode};
 use crate::mcp::types::{ToolCallResult, ToolContent, ToolDefinition};
 use crate::output::{self, OutputDestination};
-use crate::transform;
 
 pub fn json_tool_result<T: serde::Serialize>(val: &T) -> ToolCallResult {
     match serde_json::to_string_pretty(val) {
@@ -307,6 +306,43 @@ pub fn validate_mcp_output_path(
         }
     }
 
+    // Allowed directories check (if RGC_ALLOWED_OUTPUT_DIRS environment variable is set)
+    if let Ok(allowed_dirs_var) = std::env::var("RGC_ALLOWED_OUTPUT_DIRS") {
+        let allowed_dirs: Vec<PathBuf> = allowed_dirs_var
+            .split([',', ';'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .filter_map(|pb| pb.canonicalize().ok())
+            .collect();
+
+        if !allowed_dirs.is_empty() {
+            let abs_path = if p.is_relative() {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(p))
+                    .unwrap_or_else(|_| p.to_path_buf())
+            } else {
+                p.to_path_buf()
+            };
+
+            let parent_to_check = abs_path
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .unwrap_or_else(|| abs_path.clone());
+
+            let is_allowed = allowed_dirs
+                .iter()
+                .any(|allowed| parent_to_check.starts_with(allowed));
+
+            if !is_allowed {
+                return Err(format!(
+                    "Target outputPath '{}' is outside allowed directories: {:?}",
+                    trimmed, allowed_dirs_var
+                ));
+            }
+        }
+    }
+
     // Overwrite check
     if !allow_overwrite && p.exists() {
         return Err(format!(
@@ -409,10 +445,10 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .and_then(|v| v.as_u64())
         .map(|d| d as u32);
     if let Some(d) = max_dimension {
-        if d == 0 {
+        if d == 0 || d > 16384 {
             return ToolCallResult {
                 content: vec![ToolContent::Text {
-                    text: "Invalid maxDimension: must be greater than 0".to_string(),
+                    text: format!("Invalid maxDimension: must be between 1 and 16384 (got {d})"),
                 }],
                 is_error: true,
             };
@@ -801,114 +837,6 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         }
     };
 
-    let global_cursor = capture::get_global_cursor_position();
-    let cursor_info = capture::resolve_cursor_on_canvas(
-        global_cursor,
-        monitor_origin.unwrap_or((0, 0)),
-        scale_factor,
-        crop_offset,
-        (image.width(), image.height()),
-    );
-
-    let mut rgba = image.into_rgba8();
-    if (cursor_flag || highlight_cursor_flag) && cursor_info.is_some() {
-        if let Some(ref c) = cursor_info {
-            transform::draw_cursor_overlay_in_place(&mut rgba, c.x, c.y, highlight_cursor_flag);
-        }
-    }
-
-    if !manual_masks.is_empty() || !window_masks.is_empty() {
-        let windows = if !window_masks.is_empty() {
-            capture::get_windows().ok()
-        } else {
-            None
-        };
-        let redactions = match capture::build_redactions(
-            rgba.width(),
-            rgba.height(),
-            scale_factor,
-            crop_offset,
-            monitor_origin,
-            coords,
-            &manual_masks,
-            &window_masks,
-            windows.as_deref(),
-            false,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Privacy redaction failed: {e}"),
-                    }],
-                    is_error: true,
-                };
-            }
-        };
-        for &(x, y, w, h, effect) in &redactions {
-            transform::apply_redaction(&mut rgba, x, y, w, h, effect);
-        }
-    }
-
-    let mut image =
-        output::apply_image_transforms(image::DynamicImage::ImageRgba8(rgba), scale, max_dimension);
-
-    let mut diff_summary = None;
-    if let Some(ref ref_image) = preloaded_diff_ref {
-        let diff = output::calculate_image_diff(&image, ref_image, diff_threshold);
-        let mut diff_crop_offset = (0u32, 0u32);
-        if crop_changed {
-            if let Some(ref bbox) = diff.bbox {
-                let padding = 8u32;
-                diff_crop_offset = (bbox.x.saturating_sub(padding), bbox.y.saturating_sub(padding));
-                image = output::crop_to_diff_bbox(image, bbox, padding);
-            }
-        }
-        diff_summary = serde_json::to_string_pretty(&diff).ok();
-        let mut rgba = image.into_rgba8();
-        if highlight_diff {
-            if let Some(ref bbox) = diff.bbox {
-                let local_bbox = transform::DiffBBox {
-                    x: bbox.x.saturating_sub(diff_crop_offset.0),
-                    y: bbox.y.saturating_sub(diff_crop_offset.1),
-                    width: bbox.width,
-                    height: bbox.height,
-                };
-                output::highlight_diff_bbox_in_place(&mut rgba, &local_bbox, 2, None);
-            }
-        }
-        image = image::DynamicImage::ImageRgba8(rgba);
-    }
-
-    let mut rgba = image.into_rgba8();
-
-    if let Some(grid_step) = grid {
-        output::apply_grid_overlay_in_place(&mut rgba, grid_step);
-    }
-
-    if timestamp || tag.is_some() {
-        let ts_str = if timestamp {
-            Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
-        } else {
-            None
-        };
-        output::apply_watermark_and_tag_in_place(
-            &mut rgba,
-            ts_str.as_deref(),
-            tag,
-            output::WatermarkPosition::BottomRight,
-        );
-    }
-
-    let detected_elements = if som_flag {
-        let elements =
-            crate::som::detect_ui_elements_from_rgba(&rgba, som_threshold, som_max_elements);
-        crate::som::draw_som_overlay_in_place(&mut rgba, &elements);
-        Some(elements)
-    } else {
-        None
-    };
-
     // Action overlays: click ripples and drag trajectories
     let parsed_clicks =
         match parse_markers(arguments.get("clickAt"), crate::action::parse_click_marker) {
@@ -931,11 +859,54 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         }
     };
 
-    if !parsed_clicks.is_empty() || !parsed_drags.is_empty() {
-        crate::action::draw_action_overlays_in_place(&mut rgba, &parsed_clicks, &parsed_drags);
-    }
+    let pipeline_options = crate::pipeline::PipelineOptions {
+        cursor: cursor_flag,
+        highlight_cursor: highlight_cursor_flag,
+        manual_masks,
+        mask_windows: window_masks,
+        allow_missing_mask: false,
+        coords_mode: coords,
+        scale,
+        max_dimension,
+        diff_ref: preloaded_diff_ref,
+        diff_threshold,
+        crop_changed,
+        highlight_diff,
+        grid,
+        timestamp,
+        tag: tag.map(str::to_string),
+        som: som_flag,
+        som_threshold,
+        som_max_elements,
+        clicks: parsed_clicks,
+        drags: parsed_drags,
+        global_cursor_override: None,
+    };
 
-    let image = image::DynamicImage::ImageRgba8(rgba);
+    let pipeline_result = match crate::pipeline::execute_image_pipeline(
+        image,
+        scale_factor,
+        crop_offset,
+        monitor_origin,
+        &pipeline_options,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            return ToolCallResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Privacy redaction failed: {}", e.message),
+                }],
+                is_error: true,
+            };
+        }
+    };
+
+    let image = pipeline_result.image;
+    let cursor_info = pipeline_result.cursor;
+    let detected_elements = pipeline_result.elements;
+    let diff_summary = pipeline_result
+        .diff
+        .and_then(|d| serde_json::to_string_pretty(&d).ok());
 
     let mut content = Vec::new();
 

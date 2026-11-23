@@ -4,9 +4,11 @@ pub mod action;
 pub mod api;
 pub mod capture;
 pub mod cli;
+pub mod coords;
 pub mod doctor;
 pub mod mcp;
 pub mod output;
+pub mod pipeline;
 pub mod som;
 pub mod transform;
 
@@ -398,135 +400,7 @@ fn run(args: Cli) -> Result<(), ApiError> {
         (capture_target(&args)?, None)
     };
 
-    let dynamic_image = raw_captured.image;
-    let scale_factor = raw_captured.scale_factor;
-    let crop_offset = raw_captured.crop_offset;
-    let monitor_origin = raw_captured.monitor_origin;
-
-    // 4.1 Apply mouse cursor overlay if requested or query cursor info
-    let global_cursor = capture::get_global_cursor_position();
-    let cursor_info = capture::resolve_cursor_on_canvas(
-        global_cursor,
-        monitor_origin.unwrap_or((0, 0)),
-        scale_factor,
-        crop_offset,
-        (dynamic_image.width(), dynamic_image.height()),
-    );
-
-    let mut rgba = dynamic_image.into_rgba8();
-    if (args.cursor || args.highlight_cursor) && cursor_info.is_some() {
-        if let Some(ref c) = cursor_info {
-            transform::draw_cursor_overlay_in_place(&mut rgba, c.x, c.y, args.highlight_cursor);
-        }
-    }
-
-    // 4.2 Apply privacy redaction masks (transparent hole, blackout, pixelate, blur) before scaling
-    if !args.mask.is_empty() || !args.mask_window.is_empty() {
-        let windows = if !args.mask_window.is_empty() {
-            capture::get_windows().ok()
-        } else {
-            None
-        };
-        let redactions = capture::build_redactions(
-            rgba.width(),
-            rgba.height(),
-            scale_factor,
-            crop_offset,
-            monitor_origin,
-            args.coords,
-            &args.mask,
-            &args.mask_window,
-            windows.as_deref(),
-            args.allow_missing_mask,
-        )?;
-        for &(x, y, w, h, effect) in &redactions {
-            transform::apply_redaction(&mut rgba, x, y, w, h, effect);
-        }
-    }
-
-    let mut dynamic_image = output::apply_image_transforms(
-        DynamicImage::ImageRgba8(rgba),
-        args.scale,
-        args.max_dimension,
-    );
-
-    // 4.2 Handle diff calculation against reference image if requested
-    let mut diff_crop_offset = (0u32, 0u32);
-    let diff_result = if let Some(ref diff_path) = args.diff_with {
-        let ref_image = image::open(diff_path).map_err(|e| {
-            ApiError::new(
-                ErrorCode::BadArgs,
-                format!(
-                    "Failed to open diff reference image '{}': {e}",
-                    diff_path.display()
-                ),
-            )
-            .with_stage("diff_comparison")
-            .with_suggestion("Check that the reference path points to a valid readable image.")
-        })?;
-
-        let diff = output::calculate_image_diff(&dynamic_image, &ref_image, args.diff_threshold);
-
-        if args.crop_changed {
-            if let Some(ref bbox) = diff.bbox {
-                let padding = 8u32;
-                diff_crop_offset = (bbox.x.saturating_sub(padding), bbox.y.saturating_sub(padding));
-                dynamic_image = output::crop_to_diff_bbox(dynamic_image, bbox, padding);
-            }
-        }
-
-        Some(diff)
-    } else {
-        None
-    };
-
-    let mut rgba = dynamic_image.into_rgba8();
-
-    if args.highlight_diff {
-        if let Some(ref diff) = diff_result {
-            if let Some(ref bbox) = diff.bbox {
-                let local_bbox = transform::DiffBBox {
-                    x: bbox.x.saturating_sub(diff_crop_offset.0),
-                    y: bbox.y.saturating_sub(diff_crop_offset.1),
-                    width: bbox.width,
-                    height: bbox.height,
-                };
-                output::highlight_diff_bbox_in_place(&mut rgba, &local_bbox, 2, None);
-            }
-        }
-    }
-
-    // 4.3 Apply visual grounding grid overlay if requested
-    if let Some(grid_step) = args.grid {
-        output::apply_grid_overlay_in_place(&mut rgba, grid_step);
-    }
-
-    // 4.4 Apply timestamp and/or custom tag watermark badge if requested
-    if args.timestamp || args.tag.is_some() {
-        let ts_str = if args.timestamp {
-            Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
-        } else {
-            None
-        };
-        output::apply_watermark_and_tag_in_place(
-            &mut rgba,
-            ts_str.as_deref(),
-            args.tag.as_deref(),
-            output::WatermarkPosition::BottomRight,
-        );
-    }
-
-    // 4.5 Detect UI elements and apply Set-of-Mark (SoM) visual overlay if requested
-    let detected_elements = if args.som {
-        let elements =
-            som::detect_ui_elements_from_rgba(&rgba, args.som_threshold, args.som_max_elements);
-        som::draw_som_overlay_in_place(&mut rgba, &elements);
-        Some(elements)
-    } else {
-        None
-    };
-
-    // 4.6 Parse and draw click markers and drag trajectories
+    // Parse click markers and drag trajectories
     let mut clicks = Vec::new();
     for c_str in &args.click_at {
         let c = action::parse_click_marker(c_str).map_err(|e| {
@@ -573,11 +447,62 @@ fn run(args: Cli) -> Result<(), ApiError> {
             None
         };
 
-    if !clicks.is_empty() || !drags.is_empty() {
-        action::draw_action_overlays_in_place(&mut rgba, &clicks, &drags);
-    }
+    let diff_ref = if let Some(ref diff_path) = args.diff_with {
+        let ref_image = image::open(diff_path).map_err(|e| {
+            ApiError::new(
+                ErrorCode::BadArgs,
+                format!(
+                    "Failed to open diff reference image '{}': {e}",
+                    diff_path.display()
+                ),
+            )
+            .with_stage("diff_comparison")
+            .with_suggestion("Check that the reference path points to a valid readable image.")
+        })?;
+        Some(ref_image)
+    } else {
+        None
+    };
 
-    let dynamic_image = DynamicImage::ImageRgba8(rgba);
+    let pipeline_options = pipeline::PipelineOptions {
+        cursor: args.cursor,
+        highlight_cursor: args.highlight_cursor,
+        manual_masks: args.mask.clone(),
+        mask_windows: args.mask_window.clone(),
+        allow_missing_mask: args.allow_missing_mask,
+        coords_mode: args.coords,
+        scale: args.scale,
+        max_dimension: args.max_dimension,
+        diff_ref,
+        diff_threshold: args.diff_threshold,
+        crop_changed: args.crop_changed,
+        highlight_diff: args.highlight_diff,
+        grid: args.grid,
+        timestamp: args.timestamp,
+        tag: args.tag.clone(),
+        som: args.som,
+        som_threshold: args.som_threshold,
+        som_max_elements: args.som_max_elements,
+        clicks,
+        drags,
+        global_cursor_override: None,
+    };
+
+    let pipeline_result = pipeline::execute_image_pipeline(
+        raw_captured.image,
+        raw_captured.scale_factor,
+        raw_captured.crop_offset,
+        raw_captured.monitor_origin,
+        &pipeline_options,
+    )?;
+
+    let dynamic_image = pipeline_result.image;
+    let cursor_info = pipeline_result.cursor;
+    let diff_result = pipeline_result.diff;
+    let detected_elements = pipeline_result.elements;
+    let clicks = pipeline_result.clicks.unwrap_or_default();
+    let drags = pipeline_result.drags.unwrap_or_default();
+    let coordinates_info = Some(pipeline_result.coordinates);
 
     let img_width = dynamic_image.width();
     let img_height = dynamic_image.height();
@@ -656,6 +581,7 @@ fn run(args: Cli) -> Result<(), ApiError> {
                 Some(clicks)
             },
             drags: if drags.is_empty() { None } else { Some(drags) },
+            coordinates: coordinates_info,
         };
         print_json_success(result_payload)?;
     }
@@ -737,88 +663,39 @@ fn run_recording(
         None
     };
 
+    let frame_options = pipeline::RecordingFrameOptions {
+        cursor: args.cursor,
+        highlight_cursor: args.highlight_cursor,
+        manual_masks: args.mask.clone(),
+        mask_windows: args.mask_window.clone(),
+        allow_missing_mask: args.allow_missing_mask,
+        coords_mode: args.coords,
+        scale: args.scale,
+        max_dimension: args.max_dimension,
+        grid: args.grid,
+        timestamp: args.timestamp,
+        tag: args.tag.clone(),
+        som: args.som,
+        som_threshold: args.som_threshold,
+        som_max_elements: args.som_max_elements,
+    };
+
     let mut frame_count = 0u32;
     let mut stream_dims = (0u32, 0u32);
 
     while start_time.elapsed() < total_duration {
         let frame_start = Instant::now();
         let raw = capture_target(args)?;
-        let frame_img = raw.image;
 
-        let mut rgba = frame_img.into_rgba8();
-        if args.cursor || args.highlight_cursor {
-            let global_cursor = capture::get_global_cursor_position();
-            let origin = raw.monitor_origin.unwrap_or((0, 0));
-            if let Some(cursor_info) = capture::resolve_cursor_on_canvas(
-                global_cursor,
-                origin,
-                raw.scale_factor,
-                raw.crop_offset,
-                (rgba.width(), rgba.height()),
-            ) {
-                transform::draw_cursor_overlay_in_place(
-                    &mut rgba,
-                    cursor_info.x,
-                    cursor_info.y,
-                    args.highlight_cursor,
-                );
-            }
-        }
-
-        // Apply privacy redaction masks to each recorded frame before scaling
-        if !args.mask.is_empty() || !args.mask_window.is_empty() {
-            let windows = if !args.mask_window.is_empty() {
-                capture::get_windows().ok()
-            } else {
-                None
-            };
-            let redactions = capture::build_redactions(
-                rgba.width(),
-                rgba.height(),
-                raw.scale_factor,
-                raw.crop_offset,
-                raw.monitor_origin,
-                args.coords,
-                &args.mask,
-                &args.mask_window,
-                windows.as_deref(),
-                args.allow_missing_mask,
-            )?;
-            for &(x, y, w, h, effect) in &redactions {
-                transform::apply_redaction(&mut rgba, x, y, w, h, effect);
-            }
-        }
-
-        let frame_img = output::apply_image_transforms(
-            DynamicImage::ImageRgba8(rgba),
-            args.scale,
-            args.max_dimension,
-        );
-
-        let mut rgba = frame_img.into_rgba8();
-        if let Some(grid_step) = args.grid {
-            output::apply_grid_overlay_in_place(&mut rgba, grid_step);
-        }
-
-        if args.timestamp || args.tag.is_some() {
-            let ts_str = if args.timestamp {
-                Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
-            } else {
-                None
-            };
-            output::apply_watermark_and_tag_in_place(
-                &mut rgba,
-                ts_str.as_deref(),
-                args.tag.as_deref(),
-                output::WatermarkPosition::BottomRight,
-            );
-        }
-
-        if args.som {
-            let elements =
-                som::detect_ui_elements_from_rgba(&rgba, args.som_threshold, args.som_max_elements);
-            som::draw_som_overlay_in_place(&mut rgba, &elements);
-        }
+        let mut rgba = raw.image.into_rgba8();
+        let frame_img = pipeline::process_recording_frame(
+            &mut rgba,
+            raw.scale_factor,
+            raw.crop_offset,
+            raw.monitor_origin,
+            &frame_options,
+        )?;
+        let rgba = frame_img.into_rgba8();
 
         stream_dims = (rgba.width(), rgba.height());
         frame_count += 1;

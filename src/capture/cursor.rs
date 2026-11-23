@@ -43,6 +43,10 @@ pub fn resolve_cursor_on_canvas(
         x: px,
         y: py,
         visible,
+        screen_x: Some(gx),
+        screen_y: Some(gy),
+        canvas_x: Some(px),
+        canvas_y: Some(py),
     })
 }
 
@@ -60,6 +64,10 @@ mod tests {
                 x: 400,
                 y: 200,
                 visible: true,
+                screen_x: Some(500),
+                screen_y: Some(300),
+                canvas_x: Some(400),
+                canvas_y: Some(200),
             })
         );
     }
@@ -74,6 +82,10 @@ mod tests {
                 x: 250,
                 y: 130,
                 visible: true,
+                screen_x: Some(300),
+                screen_y: Some(200),
+                canvas_x: Some(250),
+                canvas_y: Some(130),
             })
         );
     }
@@ -88,6 +100,10 @@ mod tests {
                 x: -50,
                 y: -50,
                 visible: false,
+                screen_x: Some(50),
+                screen_y: Some(50),
+                canvas_x: Some(-50),
+                canvas_y: Some(-50),
             })
         );
     }

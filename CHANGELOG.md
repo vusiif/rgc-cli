@@ -5,6 +5,21 @@ All notable changes to `rgc-cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-11-23
+
+### Added
+- **Unified Coordinate Transformation System (`CoordinateTransform`, `coords.rs`)**:
+  - Implemented bidirectional coordinate transformations across ScreenSpace (OS desktop virtual pixels and DPI scaling), CanvasSpace (unscaled raw capture pixels), and ImageSpace (final exported image pixels with downscaling and diff cropping).
+  - JSON metadata now provides `coordinates` (`CoordinateSpaceInfo`), explicit `screenCenterX` / `screenCenterY` / `screenX` / `screenY` on `UiElement` (Set-of-Mark), and mapped cursor coordinates (`screenX`, `screenY`, `canvasX`, `canvasY`, `x`, `y`, `visible`) on `CursorInfo` for zero-ambiguity AI click automation.
+- **Unified Capture & Processing Pipeline (`CapturePipeline`, `pipeline.rs`)**:
+  - Consolidated scattered image transformation stages in CLI (`main.rs`) and MCP server (`mcp/tools.rs`, `mcp/record.rs`) into a single deterministic image pipeline: Cursor -> Redactions -> Scaling -> Diff & Crop -> Highlighting -> Grid -> Watermark -> Set-of-Mark -> Action markers -> Coordinate mapping.
+  - Eliminated redundant code paths, ensuring 100% behavior parity between CLI and MCP server tools.
+- **MCP Resource Bounds & Output Directory Enforcement**:
+  - Added support for `RGC_ALLOWED_OUTPUT_DIRS` directory restriction in MCP file outputs.
+  - Added maximum dimension protection (`maxDimension <= 16384`) in `capture_screen` to guard against memory allocation exhaustion.
+
+---
+
 ## [2.6.2] - 2026-11-23
 
 ### Added

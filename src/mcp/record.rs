@@ -3,7 +3,6 @@ use crate::cli::{CoordMode, MaskRegion, MaskWindow};
 use crate::mcp::base64::base64_encode;
 use crate::mcp::types::{ToolCallResult, ToolContent, ToolDefinition};
 use crate::output;
-use crate::transform;
 
 /// Returns the MCP tool definition for `record_screen`.
 pub fn get_record_tool_definition() -> ToolDefinition {
@@ -199,6 +198,23 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         }
     };
 
+    let frame_options = crate::pipeline::RecordingFrameOptions {
+        cursor: cursor_flag,
+        highlight_cursor: highlight_cursor_flag,
+        manual_masks,
+        mask_windows: window_masks,
+        allow_missing_mask: false,
+        coords_mode: CoordMode::Logical,
+        scale,
+        max_dimension,
+        grid: None,
+        timestamp: false,
+        tag: None,
+        som: false,
+        som_threshold: 25,
+        som_max_elements: 50,
+    };
+
     while start_time.elapsed() < target_duration {
         let frame_start = std::time::Instant::now();
         let captured = if all_monitors {
@@ -243,62 +259,23 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         };
 
         let mut rgba = frame_img.into_rgba8();
-        if cursor_flag || highlight_cursor_flag {
-            let global_cursor = capture::get_global_cursor_position();
-            if let Some(cursor_info) = capture::resolve_cursor_on_canvas(
-                global_cursor,
-                origin.unwrap_or((0, 0)),
-                scale_factor,
-                crop_offset,
-                (rgba.width(), rgba.height()),
-            ) {
-                transform::draw_cursor_overlay_in_place(
-                    &mut rgba,
-                    cursor_info.x,
-                    cursor_info.y,
-                    highlight_cursor_flag,
-                );
+        let frame_img = match crate::pipeline::process_recording_frame(
+            &mut rgba,
+            scale_factor,
+            crop_offset,
+            origin,
+            &frame_options,
+        ) {
+            Ok(img) => img,
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Privacy redaction failed in recording: {}", e.message),
+                    }],
+                    is_error: true,
+                };
             }
-        }
-
-        if !manual_masks.is_empty() || !window_masks.is_empty() {
-            let windows = if !window_masks.is_empty() {
-                capture::get_windows().ok()
-            } else {
-                None
-            };
-            let redactions = match capture::build_redactions(
-                rgba.width(),
-                rgba.height(),
-                scale_factor,
-                crop_offset,
-                origin,
-                CoordMode::Logical,
-                &manual_masks,
-                &window_masks,
-                windows.as_deref(),
-                false,
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    return ToolCallResult {
-                        content: vec![ToolContent::Text {
-                            text: format!("Privacy redaction failed in recording: {e}"),
-                        }],
-                        is_error: true,
-                    };
-                }
-            };
-            for &(x, y, w, h, effect) in &redactions {
-                transform::apply_redaction(&mut rgba, x, y, w, h, effect);
-            }
-        }
-
-        let frame_img = output::apply_image_transforms(
-            image::DynamicImage::ImageRgba8(rgba),
-            scale,
-            max_dimension,
-        );
+        };
         let rgba = frame_img.into_rgba8();
 
         if let Err(e) = stream.encode_frame(&rgba) {

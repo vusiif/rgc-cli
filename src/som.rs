@@ -228,15 +228,7 @@ pub fn detect_ui_elements_from_rgba(
     // Step 6: Construct UiElement list with 1-based IDs capped at max_elements
     let mut elements = Vec::with_capacity(filtered_boxes.len().min(max_elements));
     for (idx, &(x, y, w, h, _)) in filtered_boxes.iter().take(max_elements).enumerate() {
-        elements.push(UiElement {
-            id: (idx + 1) as u32,
-            x,
-            y,
-            width: w,
-            height: h,
-            center_x: x + w / 2,
-            center_y: y + h / 2,
-        });
+        elements.push(UiElement::new((idx + 1) as u32, x, y, w, h));
     }
 
     elements
@@ -349,15 +341,7 @@ mod tests {
     #[test]
     fn test_draw_som_overlay() {
         let base = DynamicImage::ImageRgba8(RgbaImage::from_pixel(200, 200, Rgba([0, 0, 0, 255])));
-        let elements = vec![UiElement {
-            id: 1,
-            x: 20,
-            y: 20,
-            width: 80,
-            height: 40,
-            center_x: 60,
-            center_y: 40,
-        }];
+        let elements = vec![UiElement::new(1, 20, 20, 80, 40)];
 
         let overlaid = draw_som_overlay(base, &elements);
         let rgba = overlaid.into_rgba8();

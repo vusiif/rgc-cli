@@ -787,5 +787,28 @@ mod tests {
         assert!(ok_res.is_ok());
 
         let _ = std::fs::remove_file(temp_file);
+
+        // Allowed output directories enforcement
+        let allowed_dir = std::env::temp_dir();
+        std::env::set_var("RGC_ALLOWED_OUTPUT_DIRS", &allowed_dir);
+
+        let allowed_target = allowed_dir.join("safe_capture.png");
+        assert!(validate_mcp_output_path(allowed_target.to_str().unwrap(), &["png"], true).is_ok());
+
+        // Target outside allowed dir should be blocked
+        let outside_target = "outside_workspace/unsafe.png";
+        let outside_err = validate_mcp_output_path(outside_target, &["png"], true);
+        assert!(outside_err.is_err());
+        assert!(outside_err.unwrap_err().contains("outside allowed directories"));
+
+        std::env::remove_var("RGC_ALLOWED_OUTPUT_DIRS");
+    }
+
+    #[test]
+    fn test_handle_mcp_tool_call_excessive_max_dimension() {
+        let req = r#"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"capture_screen","arguments":{"maxDimension":20000}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""isError":true"#));
+        assert!(resp.contains("Invalid maxDimension"));
     }
 }

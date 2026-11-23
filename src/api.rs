@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::{ActionVerificationResult, ClickMarker, DragMarker};
 use crate::cli::ImageFormat;
+use crate::coords::CoordinateSpaceInfo;
 use crate::transform::DiffResult;
 
 /// Standardized error codes for machine-readable JSON responses and process exit codes.
@@ -107,26 +108,93 @@ impl<T> ApiResponse<T> {
     }
 }
 
-/// Structured information about the mouse cursor location on the captured image.
+/// Structured information about the mouse cursor location across output image, screen, and canvas spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CursorInfo {
+    /// X coordinate on the final output image.
     pub x: i32,
+    /// Y coordinate on the final output image.
     pub y: i32,
+    /// Whether the cursor is visible inside the output image boundary.
     pub visible: bool,
+    /// Global OS desktop X coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_x: Option<i32>,
+    /// Global OS desktop Y coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_y: Option<i32>,
+    /// Unscaled canvas X coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canvas_x: Option<i32>,
+    /// Unscaled canvas Y coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canvas_y: Option<i32>,
 }
 
-/// Detected interactive UI element with bounding box and center click anchor.
+impl CursorInfo {
+    pub fn new(x: i32, y: i32, visible: bool) -> Self {
+        Self {
+            x,
+            y,
+            visible,
+            screen_x: None,
+            screen_y: None,
+            canvas_x: None,
+            canvas_y: None,
+        }
+    }
+}
+
+/// Detected interactive UI element with bounding box and center click anchor across image and screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiElement {
     pub id: u32,
+    /// Output image X coordinate (top-left).
     pub x: u32,
+    /// Output image Y coordinate (top-left).
     pub y: u32,
+    /// Output image element width.
     pub width: u32,
+    /// Output image element height.
     pub height: u32,
+    /// Output image center X coordinate.
     pub center_x: u32,
+    /// Output image center Y coordinate.
     pub center_y: u32,
+    /// Global OS desktop screen center X coordinate for direct automation clicks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_center_x: Option<i32>,
+    /// Global OS desktop screen center Y coordinate for direct automation clicks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_center_y: Option<i32>,
+    /// Global OS desktop screen top-left X coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_x: Option<i32>,
+    /// Global OS desktop screen top-left Y coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_y: Option<i32>,
+}
+
+impl UiElement {
+    pub fn new(id: u32, x: u32, y: u32, width: u32, height: u32) -> Self {
+        let center_x = x + width / 2;
+        let center_y = y + height / 2;
+        Self {
+            id,
+            x,
+            y,
+            width,
+            height,
+            center_x,
+            center_y,
+            screen_center_x: None,
+            screen_center_y: None,
+            screen_x: None,
+            screen_y: None,
+        }
+    }
 }
 
 /// Structured JSON representation of the capture operation result.
@@ -154,6 +222,8 @@ pub struct CaptureResultJson {
     pub clicks: Option<Vec<ClickMarker>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drags: Option<Vec<DragMarker>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinates: Option<CoordinateSpaceInfo>,
 }
 
 /// Structured JSON representation of the continuous recording result.
