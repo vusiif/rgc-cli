@@ -638,6 +638,311 @@ pub fn save_animated_gif(
     Ok(())
 }
 
+/// Helper to extract valid frame bitstream subchunks (ALPH, VP8, VP8L) from a single encoded WebP image.
+pub fn extract_frame_subchunks(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return None;
+    }
+    let mut offset = 12;
+    let mut start_chunk = None;
+    while offset + 8 <= bytes.len() {
+        let fourcc = &bytes[offset..offset + 4];
+        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().ok()?) as usize;
+        let padded_size = size + (size % 2);
+        let next_offset = offset + 8 + padded_size;
+
+        if (fourcc == b"VP8L" || fourcc == b"VP8 " || fourcc == b"ALPH") && start_chunk.is_none() {
+            start_chunk = Some(offset);
+        }
+        offset = next_offset;
+    }
+
+    start_chunk.map(|start| &bytes[start..])
+}
+
+/// A streaming WebP animation encoder that encodes and flushes frames incrementally using RIFF WebP chunks.
+/// Delivers full truecolor (24-bit + 8-bit alpha) recording with dramatically better compression and quality than GIF.
+pub struct WebpStreamEncoder<W: std::io::Write + std::io::Seek> {
+    writer: W,
+    fps: u32,
+    frame_count: u32,
+    dimensions: Option<(u32, u32)>,
+    total_bytes: u64,
+    finished: bool,
+}
+
+impl<W: std::io::Write + std::io::Seek> WebpStreamEncoder<W> {
+    /// Create a new streaming WebP encoder wrapping an arbitrary `std::io::Write + std::io::Seek` destination.
+    pub fn new(mut writer: W, fps: u32) -> Result<Self, OutputError> {
+        // Write placeholder RIFF header: 12 bytes
+        writer
+            .write_all(b"RIFF\0\0\0\0WEBP")
+            .map_err(OutputError::StdoutIoFailed)?;
+
+        Ok(Self {
+            writer,
+            fps: fps.clamp(1, 60),
+            frame_count: 0,
+            dimensions: None,
+            total_bytes: 12,
+            finished: false,
+        })
+    }
+
+    /// Encode a single RGBA frame immediately into the streaming WebP animation container.
+    pub fn encode_frame(&mut self, rgba: &image::RgbaImage) -> Result<(), OutputError> {
+        let (w, h) = (rgba.width(), rgba.height());
+        if w == 0 || h == 0 {
+            return Err(OutputError::InvalidPath(
+                "Frame dimensions cannot be 0".to_string(),
+            ));
+        }
+
+        if let Some((first_w, first_h)) = self.dimensions {
+            if (w, h) != (first_w, first_h) {
+                return Err(OutputError::SaveFailed {
+                    path: PathBuf::from("stream.webp"),
+                    source: image::ImageError::Parameter(
+                        image::error::ParameterError::from_kind(
+                            image::error::ParameterErrorKind::DimensionMismatch,
+                        ),
+                    ),
+                });
+            }
+        } else {
+            self.dimensions = Some((w, h));
+
+            // 1. Write VP8X chunk (18 bytes total)
+            let mut vp8x = Vec::with_capacity(18);
+            vp8x.extend_from_slice(b"VP8X");
+            vp8x.extend_from_slice(&10u32.to_le_bytes());
+            vp8x.extend_from_slice(&[0x12, 0x00, 0x00, 0x00]); // Animation flag (0x02) | Alpha flag (0x10)
+            let w_minus_1 = w.saturating_sub(1);
+            let h_minus_1 = h.saturating_sub(1);
+            vp8x.push((w_minus_1 & 0xFF) as u8);
+            vp8x.push(((w_minus_1 >> 8) & 0xFF) as u8);
+            vp8x.push(((w_minus_1 >> 16) & 0xFF) as u8);
+            vp8x.push((h_minus_1 & 0xFF) as u8);
+            vp8x.push(((h_minus_1 >> 8) & 0xFF) as u8);
+            vp8x.push(((h_minus_1 >> 16) & 0xFF) as u8);
+
+            self.writer
+                .write_all(&vp8x)
+                .map_err(OutputError::StdoutIoFailed)?;
+            self.total_bytes += vp8x.len() as u64;
+
+            // 2. Write ANIM chunk (14 bytes total)
+            let mut anim = Vec::with_capacity(14);
+            anim.extend_from_slice(b"ANIM");
+            anim.extend_from_slice(&6u32.to_le_bytes());
+            anim.extend_from_slice(&[0, 0, 0, 0]); // Background color BGRA: black transparent
+            anim.extend_from_slice(&0u16.to_le_bytes()); // Loop count: 0 = infinite
+
+            self.writer
+                .write_all(&anim)
+                .map_err(OutputError::StdoutIoFailed)?;
+            self.total_bytes += anim.len() as u64;
+        }
+
+        // 3. Encode single frame RGBA into temporary WebP buffer
+        let mut single_buf = std::io::Cursor::new(Vec::new());
+        let dyn_img = DynamicImage::ImageRgba8(rgba.clone());
+        dyn_img
+            .write_to(&mut single_buf, image::ImageFormat::WebP)
+            .map_err(|e| OutputError::SaveFailed {
+                path: PathBuf::from("frame.webp"),
+                source: e,
+            })?;
+
+        let raw_bytes = single_buf.into_inner();
+        let subchunks = extract_frame_subchunks(&raw_bytes).ok_or_else(|| {
+            OutputError::SaveFailed {
+                path: PathBuf::from("frame.webp"),
+                source: image::ImageError::Decoding(
+                    image::error::DecodingError::from_format_hint(
+                        image::error::ImageFormatHint::Exact(image::ImageFormat::WebP),
+                    ),
+                ),
+            }
+        })?;
+
+        // 4. Wrap into ANMF chunk
+        let payload_size = 16 + subchunks.len();
+        let mut anmf = Vec::with_capacity(8 + payload_size + 1);
+        anmf.extend_from_slice(b"ANMF");
+        anmf.extend_from_slice(&(payload_size as u32).to_le_bytes());
+
+        // Frame X (3 bytes, 24-bit little endian, X / 2) -> 0
+        anmf.extend_from_slice(&[0, 0, 0]);
+        // Frame Y (3 bytes, 24-bit little endian, Y / 2) -> 0
+        anmf.extend_from_slice(&[0, 0, 0]);
+
+        // Frame Width - 1 (3 bytes)
+        let w_minus_1 = w.saturating_sub(1);
+        anmf.push((w_minus_1 & 0xFF) as u8);
+        anmf.push(((w_minus_1 >> 8) & 0xFF) as u8);
+        anmf.push(((w_minus_1 >> 16) & 0xFF) as u8);
+
+        // Frame Height - 1 (3 bytes)
+        let h_minus_1 = h.saturating_sub(1);
+        anmf.push((h_minus_1 & 0xFF) as u8);
+        anmf.push(((h_minus_1 >> 8) & 0xFF) as u8);
+        anmf.push(((h_minus_1 >> 16) & 0xFF) as u8);
+
+        // Frame Duration in ms (3 bytes, uint24 little endian)
+        let delay_ms = (1000 / self.fps).max(10);
+        anmf.push((delay_ms & 0xFF) as u8);
+        anmf.push(((delay_ms >> 8) & 0xFF) as u8);
+        anmf.push(((delay_ms >> 16) & 0xFF) as u8);
+
+        // Flags (1 byte): bit 1 = Blending (1 = Overwrite / Do not blend), bit 0 = Disposal (0 = Do not dispose)
+        anmf.push(0x02);
+
+        // Append subchunks payload
+        anmf.extend_from_slice(subchunks);
+
+        // RIFF 2-byte alignment padding
+        if payload_size % 2 != 0 {
+            anmf.push(0);
+        }
+
+        self.writer
+            .write_all(&anmf)
+            .map_err(OutputError::StdoutIoFailed)?;
+        self.total_bytes += anmf.len() as u64;
+        self.frame_count += 1;
+        Ok(())
+    }
+
+    /// Finalizes the WebP animation by writing the total RIFF file size to the container header.
+    pub fn finish(&mut self) -> Result<(), OutputError> {
+        if self.finished || self.frame_count == 0 {
+            return Ok(());
+        }
+        let riff_size = (self.total_bytes.saturating_sub(8)) as u32;
+        self.writer
+            .seek(std::io::SeekFrom::Start(4))
+            .map_err(OutputError::StdoutIoFailed)?;
+        self.writer
+            .write_all(&riff_size.to_le_bytes())
+            .map_err(OutputError::StdoutIoFailed)?;
+        self.writer
+            .seek(std::io::SeekFrom::End(0))
+            .map_err(OutputError::StdoutIoFailed)?;
+        self.writer.flush().map_err(OutputError::StdoutIoFailed)?;
+        self.finished = true;
+        Ok(())
+    }
+
+    /// Returns the total number of frames encoded so far.
+    pub fn frame_count(&self) -> u32 {
+        self.frame_count
+    }
+
+    /// Returns the resolution (width, height) of the stream if at least one frame was encoded.
+    pub fn dimensions(&self) -> Option<(u32, u32)> {
+        self.dimensions
+    }
+}
+
+impl<W: std::io::Write + std::io::Seek> Drop for WebpStreamEncoder<W> {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
+}
+
+impl WebpStreamEncoder<std::io::BufWriter<std::fs::File>> {
+    /// Create a new streaming WebP encoder that writes directly to a file on disk.
+    pub fn create_file(path: &Path, fps: u32) -> Result<Self, OutputError> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                fs::create_dir_all(parent).map_err(|e| OutputError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+        }
+
+        let file = fs::File::create(path).map_err(|e| OutputError::SaveFailed {
+            path: path.to_path_buf(),
+            source: image::ImageError::IoError(e),
+        })?;
+
+        let writer = std::io::BufWriter::with_capacity(128 * 1024, file);
+        Self::new(writer, fps)
+    }
+}
+
+/// Save a sequence of image frames into an animated WebP file.
+pub fn save_animated_webp(
+    frames: &[DynamicImage],
+    fps: u32,
+    path: &Path,
+) -> Result<(), OutputError> {
+    if frames.is_empty() {
+        return Err(OutputError::InvalidPath(
+            "Cannot encode animated WebP: frame buffer is empty".to_string(),
+        ));
+    }
+
+    let mut stream = WebpStreamEncoder::create_file(path, fps)?;
+    for frame in frames {
+        stream.encode_frame(&frame.to_rgba8())?;
+    }
+    stream.finish()?;
+    Ok(())
+}
+
+/// Unified streaming recording encoder supporting both GIF and truecolor Animated WebP.
+pub enum RecordingStreamEncoder<W: std::io::Write + std::io::Seek> {
+    Gif(GifStreamEncoder<W>),
+    Webp(WebpStreamEncoder<W>),
+}
+
+impl<W: std::io::Write + std::io::Seek> RecordingStreamEncoder<W> {
+    pub fn encode_frame(&mut self, rgba: &image::RgbaImage) -> Result<(), OutputError> {
+        match self {
+            RecordingStreamEncoder::Gif(s) => s.encode_frame(rgba),
+            RecordingStreamEncoder::Webp(s) => s.encode_frame(rgba),
+        }
+    }
+
+    pub fn frame_count(&self) -> u32 {
+        match self {
+            RecordingStreamEncoder::Gif(s) => s.frame_count(),
+            RecordingStreamEncoder::Webp(s) => s.frame_count(),
+        }
+    }
+
+    pub fn dimensions(&self) -> Option<(u32, u32)> {
+        match self {
+            RecordingStreamEncoder::Gif(s) => s.dimensions(),
+            RecordingStreamEncoder::Webp(s) => s.dimensions(),
+        }
+    }
+
+    pub fn finish(&mut self) -> Result<(), OutputError> {
+        match self {
+            RecordingStreamEncoder::Gif(_) => Ok(()),
+            RecordingStreamEncoder::Webp(s) => s.finish(),
+        }
+    }
+}
+
+impl RecordingStreamEncoder<std::io::BufWriter<std::fs::File>> {
+    pub fn create_file(path: &Path, fps: u32, is_webp: bool) -> Result<Self, OutputError> {
+        if is_webp {
+            Ok(RecordingStreamEncoder::Webp(
+                WebpStreamEncoder::create_file(path, fps)?,
+            ))
+        } else {
+            Ok(RecordingStreamEncoder::Gif(
+                GifStreamEncoder::create_file(path, fps)?,
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -809,5 +1114,80 @@ mod tests {
         let encoded_bytes = buffer.into_inner();
         assert!(!encoded_bytes.is_empty());
         assert_eq!(&encoded_bytes[0..3], b"GIF");
+    }
+
+    #[test]
+    fn test_webp_stream_encoder_in_memory_and_file() {
+        use std::io::Cursor;
+        let mut buffer = Cursor::new(Vec::new());
+        {
+            let mut stream = WebpStreamEncoder::new(&mut buffer, 10).unwrap();
+
+            let frame1 = RgbaImage::from_pixel(32, 32, Rgba([255, 100, 0, 255]));
+            let frame2 = RgbaImage::from_pixel(32, 32, Rgba([0, 100, 255, 255]));
+
+            stream.encode_frame(&frame1).unwrap();
+            stream.encode_frame(&frame2).unwrap();
+
+            assert_eq!(stream.frame_count(), 2);
+            assert_eq!(stream.dimensions(), Some((32, 32)));
+            stream.finish().unwrap();
+        }
+
+        let encoded_bytes = buffer.into_inner();
+        assert!(encoded_bytes.len() > 30);
+        assert_eq!(&encoded_bytes[0..4], b"RIFF");
+        assert_eq!(&encoded_bytes[8..12], b"WEBP");
+        assert_eq!(&encoded_bytes[12..16], b"VP8X");
+
+        // Verify RIFF size matches total bytes - 8
+        let riff_size = u32::from_le_bytes(encoded_bytes[4..8].try_into().unwrap());
+        assert_eq!(riff_size as usize, encoded_bytes.len() - 8);
+
+        // Test file creation
+        let temp_webp = PathBuf::from("temp_stream_test.webp");
+        {
+            let mut file_stream = WebpStreamEncoder::create_file(&temp_webp, 10).unwrap();
+            let frame = RgbaImage::from_pixel(16, 16, Rgba([120, 200, 50, 255]));
+            file_stream.encode_frame(&frame).unwrap();
+            file_stream.finish().unwrap();
+        }
+        assert!(temp_webp.exists());
+        let meta = fs::metadata(&temp_webp).unwrap();
+        assert!(meta.len() > 20);
+        let _ = fs::remove_file(temp_webp);
+    }
+
+    #[test]
+    fn test_save_animated_webp() {
+        let f1 = DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 16, Rgba([255, 0, 0, 255])));
+        let f2 = DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 16, Rgba([0, 255, 0, 255])));
+        let target = PathBuf::from("temp_anim_test.webp");
+        let res = save_animated_webp(&[f1, f2], 5, &target);
+        assert!(res.is_ok());
+        assert!(target.exists());
+        let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn test_recording_stream_encoder_unified() {
+        use std::io::Cursor;
+        let mut gif_buf = Cursor::new(Vec::new());
+        let mut gif_stream =
+            RecordingStreamEncoder::Gif(GifStreamEncoder::new(&mut gif_buf, 10).unwrap());
+        let frame = RgbaImage::from_pixel(10, 10, Rgba([255, 255, 255, 255]));
+        gif_stream.encode_frame(&frame).unwrap();
+        assert_eq!(gif_stream.frame_count(), 1);
+
+        let mut webp_buf = Cursor::new(Vec::new());
+        {
+            let mut webp_stream =
+                RecordingStreamEncoder::Webp(WebpStreamEncoder::new(&mut webp_buf, 10).unwrap());
+            webp_stream.encode_frame(&frame).unwrap();
+            webp_stream.finish().unwrap();
+            assert_eq!(webp_stream.frame_count(), 1);
+        }
+        let webp_bytes = webp_buf.into_inner();
+        assert_eq!(&webp_bytes[0..4], b"RIFF");
     }
 }

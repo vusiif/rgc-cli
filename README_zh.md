@@ -17,6 +17,8 @@
 
 ## 🌟 核心特性
 
+- **动态 WebP 录屏与 GIF 编码**: 支持长时录屏（`--record <SECS>`），原生编码为真彩色动态 WebP（`-o rec.webp`）或流式 GIF 动图，极大提升画质与压缩率，内存占用极低。
+- **窗口工作区自动裁剪**: 支持 `--client-only`（配合 `-w, --window`），自动剔除 OS 阴影发光留白与系统标题栏，仅保留应用实际工作画布，并自适应重映射点击坐标。
 - **纯正跨平台**: 原生支持 Windows、macOS 以及 Linux (X11 与 Wayland)，采用 100% 内存安全代码（`#![forbid(unsafe_code)]`）。
 - **Model Context Protocol (MCP)**: 内置 `--mcp` stdio 服务端，遵循官方 MCP JSON-RPC 2.0 规范，开箱即用支持 Claude Desktop、Cursor、Cline、Roo Code 等 AI 编程助手。
 - **现代图片格式 (PNG, JPEG, WebP)**: 内置纯 Rust WebP 原生编码，相较传统 PNG 通常节省约 **20%~35%** 文件体积，且兼顾像素级清晰度。
@@ -59,6 +61,7 @@ cargo build --release
       --list-windows          列出所有活动的应用程序窗口并退出
   -m, --monitor <INDEX>       指定要捕获的显示器索引 (从 0 开始，默认为主显示器)
   -w, --window <ID|TITLE>     通过窗口 ID 或标题子串捕获特定窗口 (如 -w 1234 或 -w "Code")
+      --client-only           仅截取应用程序客户区/工作画布 (自动剔除 OS 透明阴影留白与标题栏，需搭配 -w)
   -a, --all-monitors          捕获所有已连接显示器并自动拼接为虚拟桌面全景大图 (与 -m、-w 互斥)
   -r, --region <x,y,w,h>      指定截取矩形区域坐标: 'x,y,w,h' (例如 '100,100,800,600')
       --coords <MODE>         区域坐标系: 'logical' (默认，按 DPI 缩放) 或 'physical' (原始物理像素)
@@ -85,7 +88,7 @@ cargo build --release
       --wait-interval <MS>    变动检测轮询间隔毫秒数 (默认 100 毫秒)
       --cursor                捕获并在截图中渲染鼠标光标箭头
       --highlight-cursor      在鼠标光标周围渲染醒目的琥珀金色聚焦光环
-      --record <SECS>         连续时间片抽样并录制指定秒数屏幕 (保存为 GIF 动图或图像序列帧)
+      --record <SECS>         连续时间片抽样并录制指定秒数屏幕 (保存为动态 WebP、GIF 动图或图像序列帧)
       --fps <1-30>            连续录制采样帧率 FPS (1-30，默认 5 FPS)
       --som                   自动检测可交互 UI 控件并叠加 Set-of-Mark (SoM) 编号徽标
       --som-threshold <1-100> 控件边缘检测灵敏度阈值 (默认 25)

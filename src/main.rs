@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![recursion_limit = "256"]
 
 pub mod accessibility;
 pub mod action;
@@ -96,10 +97,14 @@ fn capture_target(args: &Cli) -> Result<RawCaptured, ApiError> {
         })
     } else if let Some(ref win_query) = args.window {
         debug!(
-            "Initiating window capture (query={:?}, region={:?})",
-            win_query, args.region
+            "Initiating window capture (query={:?}, region={:?}, client_only={})",
+            win_query, args.region, args.client_only
         );
-        let captured = capture::capture_window_with_details(win_query, args.region.as_ref())?;
+        let captured = capture::capture_window_with_options(
+            win_query,
+            args.region.as_ref(),
+            args.client_only,
+        )?;
         Ok(RawCaptured {
             image: captured.image,
             scale_factor: captured.scale_factor,
@@ -669,19 +674,19 @@ fn run_recording(
     record_secs: f32,
     destination: OutputDestination,
 ) -> Result<(), ApiError> {
-    // Verify destination format: only GIF file or directory destination is supported
+    // Verify destination format: only GIF or WebP file or directory destination is supported
     if let OutputDestination::File(ref path) = destination {
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        if !ext.eq_ignore_ascii_case("gif") {
+        if !ext.eq_ignore_ascii_case("gif") && !ext.eq_ignore_ascii_case("webp") {
             return Err(ApiError::new(
                 ErrorCode::BadArgs,
                 format!(
-                    "Unsupported output format for screen recording: '{}'. Recording to a single file only supports animated GIF (.gif), or specify an output directory (--output-dir) to save an image sequence.",
+                    "Unsupported output format for screen recording: '{}'. Recording to a single file supports animated WebP (.webp) or animated GIF (.gif), or specify an output directory (--output-dir) to save an image sequence.",
                     path.display()
                 ),
             )
             .with_stage("argument_validation")
-            .with_suggestion("Change file extension to .gif (e.g. -o recording.gif) or use --output-dir ./frames."));
+            .with_suggestion("Change file extension to .webp or .gif (e.g. -o recording.webp) or use --output-dir ./frames."));
         }
     }
 
@@ -708,7 +713,7 @@ fn run_recording(
         );
     }
 
-    let (_is_dir_output, dir_target, gif_target) = match destination {
+    let (_is_dir_output, dir_target, anim_target, is_webp) = match destination {
         OutputDestination::Directory(ref dir) => {
             if !dir.exists() {
                 fs::create_dir_all(dir).map_err(|e| {
@@ -718,22 +723,41 @@ fn run_recording(
                     )
                 })?;
             }
-            (true, Some(dir.clone()), None)
+            (true, Some(dir.clone()), None, false)
         }
-        OutputDestination::File(p) => (false, None, Some(p)),
+        OutputDestination::File(p) => {
+            let is_webp = p
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("webp"))
+                .unwrap_or(args.format == Some(ImageFormat::Webp));
+            (false, None, Some(p), is_webp)
+        }
         _ => {
-            let filename = output::generate_default_filename(ImageFormat::Gif);
-            (false, None, Some(PathBuf::from(filename)))
+            let format = if args.format == Some(ImageFormat::Webp) {
+                ImageFormat::Webp
+            } else {
+                ImageFormat::Gif
+            };
+            let filename = output::generate_default_filename(format);
+            (
+                false,
+                None,
+                Some(PathBuf::from(filename)),
+                format == ImageFormat::Webp,
+            )
         }
     };
 
-    let mut gif_stream = if let Some(ref path) = gif_target {
-        Some(output::GifStreamEncoder::create_file(path, fps).map_err(|e| {
-            ApiError::new(
-                ErrorCode::SaveFailed,
-                format!("Failed to initialize streaming GIF encoder: {e}"),
-            )
-        })?)
+    let mut anim_stream = if let Some(ref path) = anim_target {
+        Some(
+            output::RecordingStreamEncoder::create_file(path, fps, is_webp).map_err(|e| {
+                ApiError::new(
+                    ErrorCode::SaveFailed,
+                    format!("Failed to initialize streaming recording encoder: {e}"),
+                )
+            })?,
+        )
     } else {
         None
     };
@@ -776,11 +800,11 @@ fn run_recording(
         stream_dims = (rgba.width(), rgba.height());
         frame_count += 1;
 
-        if let Some(ref mut stream) = gif_stream {
+        if let Some(ref mut stream) = anim_stream {
             stream.encode_frame(&rgba).map_err(|e| {
                 ApiError::new(
                     ErrorCode::SaveFailed,
-                    format!("Failed to encode streaming GIF frame #{frame_count}: {e}"),
+                    format!("Failed to encode streaming recording frame #{frame_count}: {e}"),
                 )
             })?;
         } else if let Some(ref dir) = dir_target {
@@ -807,11 +831,24 @@ fn run_recording(
         ));
     }
 
-    let (saved_path_buf, file_size_bytes) = if let Some(path) = gif_target {
-        drop(gif_stream);
+    let (saved_path_buf, file_size_bytes) = if let Some(path) = anim_target {
+        if let Some(ref mut stream) = anim_stream {
+            stream.finish().map_err(|e| {
+                ApiError::new(
+                    ErrorCode::SaveFailed,
+                    format!("Failed to finalize recording stream: {e}"),
+                )
+            })?;
+        }
+        drop(anim_stream);
         let size = fs::metadata(&path).ok().map(|m| m.len());
         if !args.quiet && !args.json {
-            println!("Recording saved as animated GIF: {}", path.display());
+            let label = if is_webp {
+                "animated WebP"
+            } else {
+                "animated GIF"
+            };
+            println!("Recording saved as {label}: {}", path.display());
         }
         (path, size)
     } else {

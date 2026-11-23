@@ -82,7 +82,7 @@ pub fn resolve_window_mask_bounds(
 /// Build concrete pixel redactions from manual mask regions and window masks.
 /// When `allow_missing_window` is false (default fail-closed strategy), missing mask windows
 /// or window enumeration errors will terminate capture to protect privacy.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn build_redactions(
     canvas_w: u32,
     canvas_h: u32,

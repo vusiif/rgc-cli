@@ -28,9 +28,18 @@ pub fn get_record_tool_definition() -> ToolDefinition {
                     "type": "string",
                     "description": "Optional window ID or title substring to record."
                 },
+                "clientOnly": {
+                    "type": "boolean",
+                    "description": "Optional flag when capturing a window to trim outer drop shadows and titlebars, returning only the application client/working area."
+                },
                 "allMonitors": {
                     "type": "boolean",
                     "description": "Optional flag to record multi-monitor panorama."
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["gif", "webp"],
+                    "description": "Animation container format ('gif' or 'webp'). Defaults to 'gif', or inferred from outputPath."
                 },
                 "cursor": {
                     "type": "boolean",
@@ -42,11 +51,11 @@ pub fn get_record_tool_definition() -> ToolDefinition {
                 },
                 "outputPath": {
                     "type": "string",
-                    "description": "Optional output path for animated GIF file."
+                    "description": "Optional output path for animated GIF or WebP file."
                 },
                 "returnBase64": {
                     "type": "boolean",
-                    "description": "Whether to return the animated GIF base64 data in the response. Defaults to true if outputPath is omitted."
+                    "description": "Whether to return the animated GIF or WebP base64 data in the response. Defaults to true if outputPath is omitted."
                 },
                 "scale": {
                     "type": "number",
@@ -119,20 +128,39 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .get("allowOverwrite")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let client_only = arguments
+        .get("clientOnly")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let output_path = match arguments.get("outputPath").and_then(|v| v.as_str()) {
-        Some(s) => match crate::mcp::tools::validate_mcp_output_path(s, &["gif"], allow_overwrite) {
-            Ok(pb) => Some(pb),
-            Err(e) => {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Invalid outputPath: {e}"),
-                    }],
-                    is_error: true,
-                };
+        Some(s) => {
+            match crate::mcp::tools::validate_mcp_output_path(s, &["gif", "webp"], allow_overwrite)
+            {
+                Ok(pb) => Some(pb),
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!("Invalid outputPath: {e}"),
+                        }],
+                        is_error: true,
+                    };
+                }
             }
-        },
+        }
         None => None,
+    };
+    let is_webp = if let Some(ref p) = output_path {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("webp"))
+            .unwrap_or(false)
+    } else {
+        arguments
+            .get("format")
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("webp"))
+            .unwrap_or(false)
     };
     let return_base64 = arguments
         .get("returnBase64")
@@ -194,16 +222,30 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let target_duration = std::time::Duration::from_secs_f32(duration_secs.clamp(0.1, 30.0));
     let start_time = std::time::Instant::now();
 
-    let mut gif_bytes = Vec::new();
-    let mut stream = match output::GifStreamEncoder::new(&mut gif_bytes, fps) {
-        Ok(s) => s,
-        Err(e) => {
-            return ToolCallResult {
-                content: vec![ToolContent::Text {
-                    text: format!("Failed to initialize streaming GIF encoder: {e}"),
-                }],
-                is_error: true,
-            };
+    let mut anim_buffer = std::io::Cursor::new(Vec::new());
+    let mut stream = if is_webp {
+        match output::WebpStreamEncoder::new(&mut anim_buffer, fps) {
+            Ok(s) => output::RecordingStreamEncoder::Webp(s),
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Failed to initialize streaming WebP encoder: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        }
+    } else {
+        match output::GifStreamEncoder::new(&mut anim_buffer, fps) {
+            Ok(s) => output::RecordingStreamEncoder::Gif(s),
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Failed to initialize streaming GIF encoder: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
         }
     };
 
@@ -237,7 +279,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
                 )
             })
         } else if let Some(win) = window_query {
-            capture::capture_window_with_details(win, None).map(|c| {
+            capture::capture_window_with_options(win, None, client_only).map(|c| {
                 (
                     c.image,
                     c.scale_factor,
@@ -291,7 +333,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         if let Err(e) = stream.encode_frame(&rgba) {
             return ToolCallResult {
                 content: vec![ToolContent::Text {
-                    text: format!("Failed to encode streaming GIF frame: {e}"),
+                    text: format!("Failed to encode streaming frame: {e}"),
                 }],
                 is_error: true,
             };
@@ -314,7 +356,17 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
 
     let frame_count = stream.frame_count() as usize;
     let (width, height) = stream.dimensions().unwrap_or((0, 0));
+    if let Err(e) = stream.finish() {
+        return ToolCallResult {
+            content: vec![ToolContent::Text {
+                text: format!("Failed to finalize animation container: {e}"),
+            }],
+            is_error: true,
+        };
+    }
     drop(stream);
+
+    let anim_bytes = anim_buffer.into_inner();
 
     if let Some(ref p) = output_path {
         if let Some(parent) = p.parent() {
@@ -322,10 +374,11 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
                 let _ = std::fs::create_dir_all(parent);
             }
         }
-        if let Err(e) = std::fs::write(p, &gif_bytes) {
+        if let Err(e) = std::fs::write(p, &anim_bytes) {
+            let label = if is_webp { "WebP" } else { "GIF" };
             return ToolCallResult {
                 content: vec![ToolContent::Text {
-                    text: format!("Failed to write recorded GIF to '{}': {e}", p.display()),
+                    text: format!("Failed to write recorded {label} to '{}': {e}", p.display()),
                 }],
                 is_error: true,
             };
@@ -334,10 +387,14 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
 
     let mut content = Vec::new();
     if return_base64 {
-        let b64 = base64_encode(&gif_bytes);
+        let b64 = base64_encode(&anim_bytes);
         content.push(ToolContent::Image {
             data: b64,
-            mime_type: "image/gif".to_string(),
+            mime_type: if is_webp {
+                "image/webp".to_string()
+            } else {
+                "image/gif".to_string()
+            },
         });
     }
 
@@ -345,15 +402,17 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .as_ref()
         .map(|p| format!(" saved to '{}'", p.display()))
         .unwrap_or_default();
+    let format_label = if is_webp { "animated WebP" } else { "animated GIF" };
     content.push(ToolContent::Text {
         text: format!(
-            "Recorded {} frames ({}x{}) at {} FPS over {:.2}s ({} bytes){save_msg}",
+            "Recorded {} frames ({}x{}) at {} FPS over {:.2}s ({} bytes, format: {}){save_msg}",
             frame_count,
             width,
             height,
             fps,
             start_time.elapsed().as_secs_f32(),
-            gif_bytes.len(),
+            anim_bytes.len(),
+            format_label,
         ),
     });
 

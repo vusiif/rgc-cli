@@ -3,9 +3,11 @@ const BASE64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 /// Fast, dependency-free standard base64 encoding (RFC 4648) with branchless chunked processing.
 pub fn base64_encode(input: &[u8]) -> String {
     let mut out = Vec::with_capacity(input.len().div_ceil(3) * 4);
-    let (chunks, remainder) = input.as_chunks::<3>();
+    let chunks = input.chunks_exact(3);
+    let remainder = chunks.remainder();
 
-    for &[b0, b1, b2] in chunks {
+    for chunk in chunks {
+        let (b0, b1, b2) = (chunk[0], chunk[1], chunk[2]);
         out.push(BASE64_CHARS[(b0 >> 2) as usize]);
         out.push(BASE64_CHARS[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize]);
         out.push(BASE64_CHARS[(((b1 & 0x0F) << 2) | (b2 >> 6)) as usize]);

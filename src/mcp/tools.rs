@@ -76,6 +76,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Optional window ID (e.g. '1234') or window title/app name to capture a specific application window instead of a monitor."
                     },
+                    "clientOnly": {
+                        "type": "boolean",
+                        "description": "Optional flag when capturing a window to trim outer drop shadows and titlebars, returning only the application client/working area."
+                    },
                     "allMonitors": {
                         "type": "boolean",
                         "description": "Optional flag to capture all connected displays stitched into a unified virtual desktop panorama. Conflicts with 'monitor' and 'window'."
@@ -897,7 +901,11 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
                     );
                 }
             };
-            capture::capture_window_with_details(win_query, region.as_ref())
+            let client_only = arguments
+                .get("clientOnly")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            capture::capture_window_with_options(win_query, region.as_ref(), client_only)
                 .map(|c| {
                     (
                         c.image,

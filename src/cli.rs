@@ -222,7 +222,7 @@ pub struct Cli {
     #[arg(
         long = "doctor",
         conflicts_with_all = [
-            "mcp", "list_monitors", "list_windows", "completions", "benchmark", "monitor", "window", "all_monitors", "region", "output",
+            "mcp", "list_monitors", "list_windows", "completions", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
@@ -238,7 +238,7 @@ pub struct Cli {
     #[arg(
         long = "mcp",
         conflicts_with_all = [
-            "doctor", "list_monitors", "list_windows", "completions", "benchmark", "monitor", "window", "all_monitors", "region", "output",
+            "doctor", "list_monitors", "list_windows", "completions", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "format",
             "coords", "json", "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
@@ -255,7 +255,7 @@ pub struct Cli {
         short = 'l',
         long = "list-monitors",
         conflicts_with_all = [
-            "doctor", "mcp", "list_windows", "completions", "benchmark", "monitor", "window", "all_monitors", "region", "output",
+            "doctor", "mcp", "list_windows", "completions", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
@@ -269,7 +269,7 @@ pub struct Cli {
     #[arg(
         long = "list-windows",
         conflicts_with_all = [
-            "doctor", "mcp", "list_monitors", "completions", "benchmark", "monitor", "window", "all_monitors", "region", "output",
+            "doctor", "mcp", "list_monitors", "completions", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
@@ -285,7 +285,7 @@ pub struct Cli {
         value_name = "SHELL",
         value_enum,
         conflicts_with_all = [
-            "doctor", "mcp", "list_monitors", "list_windows", "benchmark", "monitor", "window", "all_monitors", "region", "output",
+            "doctor", "mcp", "list_monitors", "list_windows", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "format", "json", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
@@ -312,6 +312,10 @@ pub struct Cli {
         conflicts_with_all = ["monitor", "all_monitors"]
     )]
     pub window: Option<String>,
+
+    /// Capture only the application window client/working area (trims system drop shadows and titlebars)
+    #[arg(long = "client-only", requires = "window")]
+    pub client_only: bool,
 
     /// Capture all connected monitors stitched into a unified virtual desktop panorama
     #[arg(
@@ -480,7 +484,7 @@ pub struct Cli {
     #[arg(long = "highlight-cursor")]
     pub highlight_cursor: bool,
 
-    /// Continuously sample and record screen over SECONDS duration (saved as animated GIF or image sequence)
+    /// Continuously sample and record screen over SECONDS duration (saved as animated WebP, animated GIF, or image sequence)
     #[arg(
         long = "record",
         value_name = "SECS",
@@ -1205,5 +1209,17 @@ mod tests {
         assert!(Cli::try_parse_from(["rgc-cli", "--watch", "--record", "5.0"]).is_err());
         // Conflict: --watch with --doctor
         assert!(Cli::try_parse_from(["rgc-cli", "--watch", "--doctor"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parsing_client_only() {
+        let cli = Cli::try_parse_from(["rgc-cli", "-w", "Code", "--client-only"]).unwrap();
+        assert_eq!(cli.window, Some("Code".to_string()));
+        assert!(cli.client_only);
+
+        // Fails if --client-only is passed without -w / --window
+        assert!(Cli::try_parse_from(["rgc-cli", "--client-only"]).is_err());
+        // Fails if --client-only is passed with --doctor
+        assert!(Cli::try_parse_from(["rgc-cli", "-w", "Code", "--client-only", "--doctor"]).is_err());
     }
 }

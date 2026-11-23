@@ -748,6 +748,7 @@ mod tests {
         assert!(res.contains("somMaxElements"));
         assert!(res.contains("clickAt"));
         assert!(res.contains("drag"));
+        assert!(res.contains("clientOnly"));
     }
 
     #[test]
@@ -852,5 +853,21 @@ mod tests {
         let resp = handle_mcp_message(req).expect("response expected");
         assert!(resp.contains(r#""isError":true"#));
         assert!(resp.contains("Invalid base64 in 'template'"));
+    }
+
+    #[test]
+    fn test_handle_mcp_record_screen_invalid_output_path_ext() {
+        let req = r#"{"jsonrpc":"2.0","id":70,"method":"tools/call","params":{"name":"record_screen","arguments":{"durationSecs":1.0,"outputPath":"output.mp4"}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""isError":true"#));
+        assert!(resp.contains("Invalid outputPath"));
+    }
+
+    #[test]
+    fn test_handle_mcp_capture_screen_client_only_nonexistent_window() {
+        let req = r#"{"jsonrpc":"2.0","id":71,"method":"tools/call","params":{"name":"capture_screen","arguments":{"window":"nonexistent_client_only_win","clientOnly":true}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""isError":true"#));
+        assert!(resp.contains("Window capture failed") || resp.contains("No window found"));
     }
 }

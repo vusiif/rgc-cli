@@ -5,6 +5,22 @@ All notable changes to `rgc-cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.0] - 2026-11-23
+
+### Added
+- **Animated WebP Recording (`src/output.rs`, `--record SECS -o rec.webp`, `--format webp`)**:
+  - Pure Rust streaming Animated WebP encoder (`WebpStreamEncoder<W: Write + Seek>`) packaging incremental frames into standard RFC 9649 RIFF WebP containers (`VP8X`, `ANIM`, `ANMF`).
+  - Full truecolor (24-bit color + 8-bit alpha) recording, overcoming legacy GIF's 256-color palette constraint with vastly superior compression efficiency and crystal-clear visual fidelity.
+  - Unified `RecordingStreamEncoder` dynamically multiplexing between GIF and WebP streaming pipelines across file targets and memory buffers.
+  - Extended MCP `record_screen` tool to accept `outputPath` with `.webp` extension or `format: "webp"`, returning truecolor Animated WebP base64 payloads (`image/webp`).
+- **Application Window Client-Area Trimming (`src/capture/window.rs`, `--client-only`)**:
+  - Developed pure-Rust, zero-unsafe client area detection (`calculate_client_area_bounds`) inspecting alpha falloff to remove Windows DWM / macOS translucent drop shadows and blur margins.
+  - Automatically calculates and trims standard DPI-scaled OS window titlebars, outputting exclusively the inner application working area.
+  - Automatic coordinate recalibration: offsets are transparently folded into `window_origin` and `crop_offset`, guaranteeing downstream coordinate transforms and AI agent interaction points remain perfectly aligned with physical screen space.
+  - Integrated into CLI `--client-only` (paired with `-w` / `--window`), MCP `capture_screen` (`clientOnly: bool`), and MCP `record_screen` (`clientOnly: bool`).
+
+---
+
 ## [2.10.0] - 2026-11-23
 
 ### Added

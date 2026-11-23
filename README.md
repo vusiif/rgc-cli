@@ -17,6 +17,8 @@ Fast, lightweight, and cross-platform command-line screen capture utility and Mo
 
 ## 🌟 Features
 
+- **Animated WebP Recording & GIF Streaming**: Continuous screen recording (`--record <SECS>`) saving into truecolor Animated WebP (`-o rec.webp`) or streaming GIF (`-o rec.gif`) with low memory footprint and high compression.
+- **Client-Area Window Trimming**: Use `--client-only` with `-w, --window` to automatically trim OS drop shadows, blur margins, and titlebars, returning exclusively the application workspace while auto-remapping coordinate systems.
 - **Pure Cross-Platform**: Native support for Windows, macOS, and Linux (X11 & Wayland) with 100% safe Rust code (`#![forbid(unsafe_code)]`).
 - **Model Context Protocol (MCP)**: Built-in `--mcp` stdio server implementing the official MCP JSON-RPC 2.0 specification for seamless AI agent integration (Claude Desktop, Cursor, Cline, Roo Code).
 - **Modern Formats (PNG, JPEG, WebP)**: Native WebP encoding support, typically delivering ~20-35% file size reduction compared to PNG with lossless or near-lossless clarity.
@@ -59,6 +61,7 @@ Options:
       --list-windows          List all active application windows and exit
   -m, --monitor <INDEX>       Monitor index to capture (0-indexed). Defaults to primary monitor
   -w, --window <ID|TITLE>     Capture a specific window by ID or title substring (e.g. -w 1234 or -w "Code")
+      --client-only           Capture only the application window client/working area (trims system drop shadows and titlebars, requires -w)
   -a, --all-monitors          Capture all connected monitors stitched into a virtual desktop panorama (conflicts with -m, -w)
   -r, --region <x,y,w,h>      Region to capture in coordinates: 'x,y,w,h' (e.g. 100,100,800,600)
       --coords <MODE>         Coordinate system for region: 'logical' (default, scaled by DPI) or 'physical' (raw pixels)
@@ -85,7 +88,7 @@ Options:
       --wait-interval <MS>    Polling interval in ms between change detection checks (default: 100)
       --cursor                Capture and render mouse cursor on the screenshot
       --highlight-cursor      Render a prominent visual highlight ring around the mouse cursor
-      --record <SECS>         Continuously sample and record screen over SECONDS duration (saved as animated GIF or image sequence)
+      --record <SECS>         Continuously sample and record screen over SECONDS duration (saved as animated WebP, animated GIF, or image sequence)
       --fps <1-30>            Sampling framerate (FPS, 1-30) for continuous recording (default: 5)
       --som                   Detect interactive UI elements and overlay Set-of-Mark (SoM) numbered badges for AI navigation
       --som-threshold <1-100> Sensitivity threshold for UI element detection (default: 25)
