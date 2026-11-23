@@ -437,7 +437,8 @@ fn run(args: Cli) -> Result<(), ApiError> {
             &args.mask,
             &args.mask_window,
             windows.as_deref(),
-        );
+            args.allow_missing_mask,
+        )?;
         for &(x, y, w, h, effect) in &redactions {
             transform::apply_redaction(&mut rgba, x, y, w, h, effect);
         }
@@ -450,6 +451,7 @@ fn run(args: Cli) -> Result<(), ApiError> {
     );
 
     // 4.2 Handle diff calculation against reference image if requested
+    let mut diff_crop_offset = (0u32, 0u32);
     let diff_result = if let Some(ref diff_path) = args.diff_with {
         let ref_image = image::open(diff_path).map_err(|e| {
             ApiError::new(
@@ -467,7 +469,9 @@ fn run(args: Cli) -> Result<(), ApiError> {
 
         if args.crop_changed {
             if let Some(ref bbox) = diff.bbox {
-                dynamic_image = output::crop_to_diff_bbox(dynamic_image, bbox, 8);
+                let padding = 8u32;
+                diff_crop_offset = (bbox.x.saturating_sub(padding), bbox.y.saturating_sub(padding));
+                dynamic_image = output::crop_to_diff_bbox(dynamic_image, bbox, padding);
             }
         }
 
@@ -481,7 +485,13 @@ fn run(args: Cli) -> Result<(), ApiError> {
     if args.highlight_diff {
         if let Some(ref diff) = diff_result {
             if let Some(ref bbox) = diff.bbox {
-                output::highlight_diff_bbox_in_place(&mut rgba, bbox, 2, None);
+                let local_bbox = transform::DiffBBox {
+                    x: bbox.x.saturating_sub(diff_crop_offset.0),
+                    y: bbox.y.saturating_sub(diff_crop_offset.1),
+                    width: bbox.width,
+                    height: bbox.height,
+                };
+                output::highlight_diff_bbox_in_place(&mut rgba, &local_bbox, 2, None);
             }
         }
     }
@@ -658,6 +668,22 @@ fn run_recording(
     record_secs: f32,
     destination: OutputDestination,
 ) -> Result<(), ApiError> {
+    // Verify destination format: only GIF file or directory destination is supported
+    if let OutputDestination::File(ref path) = destination {
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if !ext.eq_ignore_ascii_case("gif") {
+            return Err(ApiError::new(
+                ErrorCode::BadArgs,
+                format!(
+                    "Unsupported output format for screen recording: '{}'. Recording to a single file only supports animated GIF (.gif), or specify an output directory (--output-dir) to save an image sequence.",
+                    path.display()
+                ),
+            )
+            .with_stage("argument_validation")
+            .with_suggestion("Change file extension to .gif (e.g. -o recording.gif) or use --output-dir ./frames."));
+        }
+    }
+
     if let Some(delay_ms) = args.delay {
         if delay_ms > 0 {
             if !args.quiet && !args.json {
@@ -704,6 +730,30 @@ fn run_recording(
                     cursor_info.y,
                     args.highlight_cursor,
                 );
+            }
+        }
+
+        // Apply privacy redaction masks to each recorded frame before scaling
+        if !args.mask.is_empty() || !args.mask_window.is_empty() {
+            let windows = if !args.mask_window.is_empty() {
+                capture::get_windows().ok()
+            } else {
+                None
+            };
+            let redactions = capture::build_redactions(
+                rgba.width(),
+                rgba.height(),
+                raw.scale_factor,
+                raw.crop_offset,
+                raw.monitor_origin,
+                args.coords,
+                &args.mask,
+                &args.mask_window,
+                windows.as_deref(),
+                args.allow_missing_mask,
+            )?;
+            for &(x, y, w, h, effect) in &redactions {
+                transform::apply_redaction(&mut rgba, x, y, w, h, effect);
             }
         }
 

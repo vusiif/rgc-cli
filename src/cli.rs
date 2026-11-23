@@ -184,6 +184,25 @@ pub fn parse_scale_factor(s: &str) -> Result<f64, String> {
     Ok(factor)
 }
 
+/// Parses and validates a recording duration in seconds (must be finite positive <= 3600s).
+pub fn parse_record_duration(s: &str) -> Result<f32, String> {
+    let secs: f32 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("Invalid record duration '{s}': expected a positive number of seconds"))?;
+    if !secs.is_finite() || secs <= 0.0 {
+        return Err(format!(
+            "Recording duration must be a finite positive number of seconds (got '{s}')"
+        ));
+    }
+    if secs > 3600.0 {
+        return Err(format!(
+            "Recording duration cannot exceed 3600.0 seconds (got '{s}')"
+        ));
+    }
+    Ok(secs)
+}
+
 /// Cross-platform command-line screen capture utility.
 #[derive(Parser, Debug)]
 #[command(
@@ -321,6 +340,10 @@ pub struct Cli {
     )]
     pub mask_window: Vec<MaskWindow>,
 
+    /// Allow export to proceed if specified --mask-window target is not found on desktop (default: fail-closed to protect privacy)
+    #[arg(long = "allow-missing-mask")]
+    pub allow_missing_mask: bool,
+
     /// Output file path or directory, or '-' for stdout stream. Defaults to timestamped file in CWD
     #[arg(
         short = 'o',
@@ -446,7 +469,8 @@ pub struct Cli {
     #[arg(
         long = "record",
         value_name = "SECS",
-        value_parser = clap::value_parser!(f32)
+        conflicts_with_all = ["diff_with", "crop_changed", "highlight_diff", "verify_click"],
+        value_parser = parse_record_duration
     )]
     pub record: Option<f32>,
 
@@ -995,5 +1019,22 @@ mod tests {
         // Action conflict with doctor
         assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--click-at", "100,100"]).is_err());
         assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--verify-click", "100,100"]).is_err());
+    }
+
+    #[test]
+    fn test_parse_record_duration_validation() {
+        assert_eq!(parse_record_duration("5").unwrap(), 5.0);
+        assert_eq!(parse_record_duration("2.5").unwrap(), 2.5);
+
+        // Disallow negative, zero, NaN, inf, and over 3600
+        assert!(parse_record_duration("0").is_err());
+        assert!(parse_record_duration("-1").is_err());
+        assert!(parse_record_duration("nan").is_err());
+        assert!(parse_record_duration("inf").is_err());
+        assert!(parse_record_duration("-inf").is_err());
+        assert!(parse_record_duration("3601").is_err());
+
+        // CLI conflict with diff-with
+        assert!(Cli::try_parse_from(["rgc-cli", "--record", "5", "--diff-with", "ref.png"]).is_err());
     }
 }

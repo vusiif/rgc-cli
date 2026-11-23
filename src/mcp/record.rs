@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::capture;
-use crate::cli::CoordMode;
+use crate::cli::{CoordMode, MaskRegion, MaskWindow};
 use crate::mcp::base64::base64_encode;
 use crate::mcp::types::{ToolCallResult, ToolContent, ToolDefinition};
 use crate::output;
@@ -58,6 +58,16 @@ pub fn get_record_tool_definition() -> ToolDefinition {
                 "maxDimension": {
                     "type": "integer",
                     "description": "Optional maximum dimension in pixels."
+                },
+                "redactions": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional privacy redaction regions: 'x,y,w,h[:effect]' (effect: transparent, blackout, pixelate, blur)."
+                },
+                "maskWindows": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional window titles or IDs to redact from recorded frames."
                 }
             },
             "required": ["durationSecs"],
@@ -69,11 +79,11 @@ pub fn get_record_tool_definition() -> ToolDefinition {
 /// Execute the `record_screen` MCP tool, sampling consecutive frames and encoding them as an animated GIF.
 pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let duration_secs = match arguments.get("durationSecs").and_then(|v| v.as_f64()) {
-        Some(d) if d > 0.0 => d as f32,
+        Some(d) if d.is_finite() && d > 0.0 && d <= 3600.0 => d as f32,
         _ => {
             return ToolCallResult {
                 content: vec![ToolContent::Text {
-                    text: "Missing or invalid 'durationSecs' parameter: must be a positive number"
+                    text: "Missing or invalid 'durationSecs' parameter: must be a finite positive number <= 3600.0"
                         .to_string(),
                 }],
                 is_error: true,
@@ -113,6 +123,48 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .get("returnBase64")
         .and_then(|v| v.as_bool())
         .unwrap_or(output_path.is_none());
+
+    let mut manual_masks = Vec::new();
+    if let Some(redacts_val) = arguments.get("redactions") {
+        if let Some(arr) = redacts_val.as_array() {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    match s.parse::<MaskRegion>() {
+                        Ok(mr) => manual_masks.push(mr),
+                        Err(e) => {
+                            return ToolCallResult {
+                                content: vec![ToolContent::Text {
+                                    text: format!("Invalid redaction '{s}': {e}"),
+                                }],
+                                is_error: true,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut window_masks = Vec::new();
+    if let Some(win_masks_val) = arguments.get("maskWindows") {
+        if let Some(arr) = win_masks_val.as_array() {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    match s.parse::<MaskWindow>() {
+                        Ok(mw) => window_masks.push(mw),
+                        Err(e) => {
+                            return ToolCallResult {
+                                content: vec![ToolContent::Text {
+                                    text: format!("Invalid maskWindows entry '{s}': {e}"),
+                                }],
+                                is_error: true,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     let interval = std::time::Duration::from_secs_f32(1.0 / fps as f32);
     let target_duration = std::time::Duration::from_secs_f32(duration_secs.clamp(0.1, 30.0));
@@ -179,6 +231,39 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
                     cursor_info.y,
                     highlight_cursor_flag,
                 );
+            }
+        }
+
+        if !manual_masks.is_empty() || !window_masks.is_empty() {
+            let windows = if !window_masks.is_empty() {
+                capture::get_windows().ok()
+            } else {
+                None
+            };
+            let redactions = match capture::build_redactions(
+                rgba.width(),
+                rgba.height(),
+                scale_factor,
+                crop_offset,
+                origin,
+                CoordMode::Logical,
+                &manual_masks,
+                &window_masks,
+                windows.as_deref(),
+                false,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!("Privacy redaction failed in recording: {e}"),
+                        }],
+                        is_error: true,
+                    };
+                }
+            };
+            for &(x, y, w, h, effect) in &redactions {
+                transform::apply_redaction(&mut rgba, x, y, w, h, effect);
             }
         }
 

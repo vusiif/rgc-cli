@@ -749,7 +749,7 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         } else {
             None
         };
-        let redactions = capture::build_redactions(
+        let redactions = match capture::build_redactions(
             rgba.width(),
             rgba.height(),
             scale_factor,
@@ -759,7 +759,18 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
             &manual_masks,
             &window_masks,
             windows.as_deref(),
-        );
+            false,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Privacy redaction failed: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        };
         for &(x, y, w, h, effect) in &redactions {
             transform::apply_redaction(&mut rgba, x, y, w, h, effect);
         }
@@ -771,16 +782,25 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let mut diff_summary = None;
     if let Some(ref ref_image) = preloaded_diff_ref {
         let diff = output::calculate_image_diff(&image, ref_image, diff_threshold);
+        let mut diff_crop_offset = (0u32, 0u32);
         if crop_changed {
             if let Some(ref bbox) = diff.bbox {
-                image = output::crop_to_diff_bbox(image, bbox, 8);
+                let padding = 8u32;
+                diff_crop_offset = (bbox.x.saturating_sub(padding), bbox.y.saturating_sub(padding));
+                image = output::crop_to_diff_bbox(image, bbox, padding);
             }
         }
         diff_summary = serde_json::to_string_pretty(&diff).ok();
         let mut rgba = image.into_rgba8();
         if highlight_diff {
             if let Some(ref bbox) = diff.bbox {
-                output::highlight_diff_bbox_in_place(&mut rgba, bbox, 2, None);
+                let local_bbox = transform::DiffBBox {
+                    x: bbox.x.saturating_sub(diff_crop_offset.0),
+                    y: bbox.y.saturating_sub(diff_crop_offset.1),
+                    width: bbox.width,
+                    height: bbox.height,
+                };
+                output::highlight_diff_bbox_in_place(&mut rgba, &local_bbox, 2, None);
             }
         }
         image = image::DynamicImage::ImageRgba8(rgba);

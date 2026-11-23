@@ -1,6 +1,7 @@
 use log::debug;
 use xcap::Window;
 
+use crate::capture::types::CaptureError;
 use crate::capture::window::find_window;
 use crate::cli::{CoordMode, MaskEffect, MaskRegion, MaskWindow, Region};
 
@@ -79,6 +80,8 @@ pub fn resolve_window_mask_bounds(
 }
 
 /// Build concrete pixel redactions from manual mask regions and window masks.
+/// When `allow_missing_window` is false (default fail-closed strategy), missing mask windows
+/// or window enumeration errors will terminate capture to protect privacy.
 #[allow(clippy::too_many_arguments)]
 pub fn build_redactions(
     canvas_w: u32,
@@ -90,7 +93,8 @@ pub fn build_redactions(
     manual_masks: &[MaskRegion],
     window_masks: &[MaskWindow],
     windows: Option<&[Window]>,
-) -> Vec<(u32, u32, u32, u32, MaskEffect)> {
+    allow_missing_window: bool,
+) -> Result<Vec<(u32, u32, u32, u32, MaskEffect)>, CaptureError> {
     let mut redactions = Vec::new();
 
     // 1. Process manual mask regions
@@ -138,57 +142,85 @@ pub fn build_redactions(
 
     // 2. Process window masks
     if !window_masks.is_empty() {
-        if let Some((mon_x, mon_y)) = monitor_origin {
-            if let Some(win_list) = windows {
-                for wm in window_masks {
-                    match find_window(win_list, &wm.query) {
-                        Ok(target_win) => {
-                            if target_win.is_minimized().unwrap_or(false) {
-                                debug!("Mask window target '{}' is minimized, skipping", wm.query);
-                                continue;
-                            }
-                            let win_x = target_win.x().unwrap_or(0);
-                            let win_y = target_win.y().unwrap_or(0);
-                            let win_w = target_win.width().unwrap_or(0);
-                            let win_h = target_win.height().unwrap_or(0);
+        let (mon_x, mon_y) = match monitor_origin {
+            Some(orig) => orig,
+            None => {
+                if !allow_missing_window {
+                    return Err(CaptureError::MaskWindowNotFound(
+                        window_masks[0].query.clone(),
+                    ));
+                } else {
+                    debug!("Cannot resolve window masks: monitor origin is unknown");
+                    return Ok(redactions);
+                }
+            }
+        };
 
-                            if let Some((x, y, w, h)) = resolve_window_mask_bounds(
-                                win_x,
-                                win_y,
-                                win_w,
-                                win_h,
-                                mon_x,
-                                mon_y,
-                                crop_offset.0,
-                                crop_offset.1,
-                                canvas_w,
-                                canvas_h,
-                            ) {
-                                debug!(
-                                    "Resolved window mask '{}' [bounds {},{} {}x{}]: x={}, y={}, w={}, h={}, effect={:?}",
-                                    wm.query, win_x, win_y, win_w, win_h, x, y, w, h, wm.effect
-                                );
-                                redactions.push((x, y, w, h, wm.effect));
-                            } else {
-                                debug!(
-                                    "Window mask '{}' does not intersect captured screen area",
-                                    wm.query
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            debug!(
-                                "Window mask target '{}' not found on desktop: {}",
-                                wm.query, e
-                            );
-                        }
+        let win_list = match windows {
+            Some(list) => list,
+            None => {
+                if !allow_missing_window {
+                    return Err(CaptureError::MaskWindowNotFound(
+                        window_masks[0].query.clone(),
+                    ));
+                } else {
+                    debug!("Window list is not available, skipping window masks");
+                    return Ok(redactions);
+                }
+            }
+        };
+
+        for wm in window_masks {
+            match find_window(win_list, &wm.query) {
+                Ok(target_win) => {
+                    if target_win.is_minimized().unwrap_or(false) {
+                        debug!("Mask window target '{}' is minimized, skipping", wm.query);
+                        continue;
+                    }
+                    let win_x = target_win.x().unwrap_or(0);
+                    let win_y = target_win.y().unwrap_or(0);
+                    let win_w = target_win.width().unwrap_or(0);
+                    let win_h = target_win.height().unwrap_or(0);
+
+                    if let Some((x, y, w, h)) = resolve_window_mask_bounds(
+                        win_x,
+                        win_y,
+                        win_w,
+                        win_h,
+                        mon_x,
+                        mon_y,
+                        crop_offset.0,
+                        crop_offset.1,
+                        canvas_w,
+                        canvas_h,
+                    ) {
+                        debug!(
+                            "Resolved window mask '{}' [bounds {},{} {}x{}]: x={}, y={}, w={}, h={}, effect={:?}",
+                            wm.query, win_x, win_y, win_w, win_h, x, y, w, h, wm.effect
+                        );
+                        redactions.push((x, y, w, h, wm.effect));
+                    } else {
+                        debug!(
+                            "Window mask '{}' does not intersect captured screen area",
+                            wm.query
+                        );
+                    }
+                }
+                Err(e) => {
+                    if !allow_missing_window {
+                        return Err(CaptureError::MaskWindowNotFound(wm.query.clone()));
+                    } else {
+                        debug!(
+                            "Window mask target '{}' not found on desktop: {}",
+                            wm.query, e
+                        );
                     }
                 }
             }
         }
     }
 
-    redactions
+    Ok(redactions)
 }
 
 #[cfg(test)]
@@ -280,9 +312,48 @@ mod tests {
             &manual,
             &window_masks,
             None,
-        );
+            false,
+        )
+        .unwrap();
 
         assert_eq!(redactions.len(), 1);
         assert_eq!(redactions[0], (15, 30, 45, 60, MaskEffect::Transparent));
+
+        // Test fail-closed on missing mask windows
+        let missing_mask = vec![MaskWindow {
+            query: "NonExistentSensitiveWindow123".to_string(),
+            effect: MaskEffect::Blackout,
+        }];
+
+        // Fail-closed mode (allow_missing_window = false) returns error
+        let err_res = build_redactions(
+            500,
+            500,
+            1.0,
+            (0, 0),
+            Some((0, 0)),
+            CoordMode::Logical,
+            &[],
+            &missing_mask,
+            Some(&[]),
+            false,
+        );
+        assert!(matches!(err_res, Err(CaptureError::MaskWindowNotFound(_))));
+
+        // Tolerant mode (allow_missing_window = true) skips missing window
+        let ok_res = build_redactions(
+            500,
+            500,
+            1.0,
+            (0, 0),
+            Some((0, 0)),
+            CoordMode::Logical,
+            &[],
+            &missing_mask,
+            Some(&[]),
+            true,
+        );
+        assert!(ok_res.is_ok());
+        assert_eq!(ok_res.unwrap().len(), 0);
     }
 }

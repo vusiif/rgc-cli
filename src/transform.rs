@@ -111,8 +111,8 @@ pub fn apply_redaction(
             let raw = img.as_mut();
             for py in y0..y1 {
                 let off = (py as usize) * stride + (x0 as usize) * 4;
-                for px in raw[off..off + row_len].as_chunks_mut::<4>().0 {
-                    *px = [0, 0, 0, 255];
+                for px in raw[off..off + row_len].chunks_exact_mut(4) {
+                    px.copy_from_slice(&[0, 0, 0, 255]);
                 }
             }
         }
@@ -944,6 +944,41 @@ mod tests {
         assert_eq!(rgba.get_pixel(20, 20), &image::Rgba([255, 30, 30, 255]));
         // Bottom border at (20, 49) should be bright red
         assert_eq!(rgba.get_pixel(20, 49), &image::Rgba([255, 30, 30, 255]));
+    }
+
+    #[test]
+    fn test_highlight_diff_bbox_with_crop_mapping() {
+        let base =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(500, 500, image::Rgba([0, 0, 0, 255])));
+        let bbox = DiffBBox {
+            x: 200,
+            y: 250,
+            width: 50,
+            height: 40,
+        };
+        let padding = 8u32;
+        let crop_x = bbox.x.saturating_sub(padding);
+        let crop_y = bbox.y.saturating_sub(padding);
+
+        let cropped = crop_to_diff_bbox(base, &bbox, padding);
+        let mut rgba = cropped.into_rgba8();
+
+        // Local bbox mapped to cropped image coordinates
+        let local_bbox = DiffBBox {
+            x: bbox.x.saturating_sub(crop_x),
+            y: bbox.y.saturating_sub(crop_y),
+            width: bbox.width,
+            height: bbox.height,
+        };
+
+        highlight_diff_bbox_in_place(&mut rgba, &local_bbox, 2, None);
+
+        // Highlight top-left border should be at local coordinates (8, 8)
+        assert_eq!(local_bbox.x, 8);
+        assert_eq!(local_bbox.y, 8);
+        assert_eq!(rgba.get_pixel(8, 8), &image::Rgba([255, 30, 30, 255]));
+        // Bottom-right border at (57, 47)
+        assert_eq!(rgba.get_pixel(57, 47), &image::Rgba([255, 30, 30, 255]));
     }
 
     #[test]

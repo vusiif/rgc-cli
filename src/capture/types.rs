@@ -26,6 +26,9 @@ pub enum CaptureError {
     #[error("No window found matching '{0}'")]
     WindowNotFound(String),
 
+    #[error("Mask window target '{0}' was not found on desktop")]
+    MaskWindowNotFound(String),
+
     #[error("Cannot capture window #{0} ('{1}') because it is minimized")]
     WindowMinimized(u32, String),
 
@@ -92,6 +95,16 @@ impl From<CaptureError> for ApiError {
             )
             .with_stage("window_selection")
             .with_suggestion("Run 'rgc-cli --list-windows' to inspect all active window titles and IDs."),
+            CaptureError::MaskWindowNotFound(pattern) => ApiError::new(
+                ErrorCode::BadArgs,
+                format!(
+                    "Mask window target '{pattern}' was not found on desktop. Aborting export to prevent sensitive information leakage."
+                ),
+            )
+            .with_stage("mask_window_lookup")
+            .with_suggestion(
+                "Verify active windows with --list-windows, or pass --allow-missing-mask to ignore nonexistent mask windows.",
+            ),
             CaptureError::WindowMinimized(id, title) => ApiError::new(
                 ErrorCode::CaptureFailed,
                 format!("Cannot capture window #{id} ('{title}') because it is minimized."),
