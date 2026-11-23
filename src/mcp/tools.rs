@@ -596,11 +596,13 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let wait_timeout_ms = arguments
         .get("waitTimeoutMs")
         .and_then(|v| v.as_u64())
-        .unwrap_or(5000);
+        .unwrap_or(5000)
+        .clamp(10, 60_000);
     let wait_interval_ms = arguments
         .get("waitIntervalMs")
         .and_then(|v| v.as_u64())
-        .unwrap_or(100);
+        .unwrap_or(100)
+        .clamp(10, 5000);
     let cursor_flag = arguments
         .get("cursor")
         .and_then(|v| v.as_bool())

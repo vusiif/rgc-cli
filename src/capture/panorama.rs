@@ -59,8 +59,10 @@ pub fn capture_all_monitors_with_details(
         return Err(CaptureError::NoMonitorsFound);
     }
 
-    let total_w = (max_x - min_x).max(1) as u32;
-    let total_h = (max_y - min_y).max(1) as u32;
+    let diff_w = (max_x as i64) - (min_x as i64);
+    let diff_h = (max_y as i64) - (min_y as i64);
+    let total_w = (diff_w.max(1) as u32).min(32768);
+    let total_h = (diff_h.max(1) as u32).min(32768);
 
     debug!(
         "Stitching multi-monitor panorama: virtual desktop ({}, {})..({}, {}) = {}x{}, displays: {}",

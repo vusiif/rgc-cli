@@ -48,11 +48,10 @@ pub fn detect_ui_elements_from_rgba(
     let fill_lum_row = |row: u32, buf: &mut [u8]| {
         let offset = (row as usize) * stride;
         let slice = &raw_bytes[offset..offset + stride];
-        for (x, out_val) in buf.iter_mut().enumerate().take(w) {
-            let px = x * 4;
-            let r = slice[px] as u32;
-            let g = slice[px + 1] as u32;
-            let b = slice[px + 2] as u32;
+        for (chunk, out_val) in slice.chunks_exact(4).zip(buf.iter_mut()).take(w) {
+            let r = chunk[0] as u32;
+            let g = chunk[1] as u32;
+            let b = chunk[2] as u32;
             *out_val = ((r * 299 + g * 587 + b * 114) / 1000) as u8;
         }
     };

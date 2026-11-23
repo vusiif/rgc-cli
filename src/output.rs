@@ -746,9 +746,9 @@ impl<W: std::io::Write + std::io::Seek> WebpStreamEncoder<W> {
 
         // 3. Encode single frame RGBA into temporary WebP buffer
         let mut single_buf = std::io::Cursor::new(Vec::new());
-        let dyn_img = DynamicImage::ImageRgba8(rgba.clone());
-        dyn_img
-            .write_to(&mut single_buf, image::ImageFormat::WebP)
+        let encoder = image::codecs::webp::WebPEncoder::new_lossless(&mut single_buf);
+        encoder
+            .encode(rgba.as_raw(), w, h, image::ExtendedColorType::Rgba8)
             .map_err(|e| OutputError::SaveFailed {
                 path: PathBuf::from("frame.webp"),
                 source: e,

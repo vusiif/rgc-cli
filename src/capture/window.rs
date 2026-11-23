@@ -137,23 +137,55 @@ pub fn calculate_client_area_bounds(
         return (0, 0, w, h);
     }
 
-    // 1. Detect non-transparent content boundary (ignores DWM translucent drop shadows)
+    // 1. Detect non-transparent content boundary using edge-shrink scan
+    let stride = (w as usize) * 4;
+    let raw = rgba.as_raw();
+
+    // Find top-most row with alpha >= 32
+    let mut min_y = h;
+    for y in 0..h {
+        let row = &raw[(y as usize) * stride..((y as usize) + 1) * stride];
+        if row.chunks_exact(4).any(|px| px[3] >= 32) {
+            min_y = y;
+            break;
+        }
+    }
+
+    if min_y == h {
+        return (0, 0, w, h);
+    }
+
+    // Find bottom-most row with alpha >= 32
+    let mut max_y = min_y;
+    for y in (min_y..h).rev() {
+        let row = &raw[(y as usize) * stride..((y as usize) + 1) * stride];
+        if row.chunks_exact(4).any(|px| px[3] >= 32) {
+            max_y = y;
+            break;
+        }
+    }
+
+    // Find left-most and right-most x across min_y..=max_y
     let mut min_x = w;
     let mut max_x = 0;
-    let mut min_y = h;
-    let mut max_y = 0;
-
-    let raw = rgba.as_raw();
-    for y in 0..h {
-        let row_offset = (y as usize) * (w as usize) * 4;
-        for x in 0..w {
-            let a = raw[row_offset + (x as usize) * 4 + 3];
-            // Alpha threshold 32 ignores semi-transparent blurred shadow falloff
-            if a >= 32 {
-                if x < min_x { min_x = x; }
-                if x > max_x { max_x = x; }
-                if y < min_y { min_y = y; }
-                if y > max_y { max_y = y; }
+    for y in min_y..=max_y {
+        let row = &raw[(y as usize) * stride..((y as usize) + 1) * stride];
+        // Scan left edge only up to current min_x
+        for (x, px) in row.chunks_exact(4).enumerate().take(min_x as usize) {
+            if px[3] >= 32 {
+                min_x = x as u32;
+                break;
+            }
+        }
+        // Scan right edge only down to current max_x
+        for (x_offset, px) in row.chunks_exact(4).rev().enumerate() {
+            let x = (w - 1).saturating_sub(x_offset as u32);
+            if x <= max_x {
+                break;
+            }
+            if px[3] >= 32 {
+                max_x = x;
+                break;
             }
         }
     }

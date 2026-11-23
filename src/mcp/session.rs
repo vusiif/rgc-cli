@@ -53,35 +53,39 @@ impl SessionManager {
         }
     }
 
-    /// Prune expired sessions older than TTL and evict oldest if capacity exceeded.
-    pub fn cleanup(&self) {
-        if let Ok(mut map) = self.sessions.lock() {
-            let now = Instant::now();
-            map.retain(|_, record| now.duration_since(record.last_accessed) < SESSION_TTL);
+    fn cleanup_map(map: &mut HashMap<String, SessionRecord>) {
+        let now = Instant::now();
+        map.retain(|_, record| now.saturating_duration_since(record.last_accessed) < SESSION_TTL);
 
-            while map.len() >= MAX_CONCURRENT_SESSIONS {
-                if let Some(oldest_key) = map
-                    .iter()
-                    .min_by_key(|(_, r)| r.last_accessed)
-                    .map(|(k, _)| k.clone())
-                {
-                    map.remove(&oldest_key);
-                } else {
-                    break;
-                }
+        while map.len() >= MAX_CONCURRENT_SESSIONS {
+            if let Some(oldest_key) = map
+                .iter()
+                .min_by_key(|(_, r)| r.last_accessed)
+                .map(|(k, _)| k.clone())
+            {
+                map.remove(&oldest_key);
+            } else {
+                break;
             }
         }
     }
 
+    /// Prune expired sessions older than TTL and evict oldest if capacity exceeded.
+    pub fn cleanup(&self) {
+        if let Ok(mut map) = self.sessions.lock() {
+            Self::cleanup_map(&mut map);
+        }
+    }
+
     pub fn get(&self, session_id: &str) -> Option<SessionRecord> {
-        self.cleanup();
-        let map = self.sessions.lock().ok()?;
+        let mut map = self.sessions.lock().ok()?;
+        Self::cleanup_map(&mut map);
         map.get(session_id).cloned()
     }
 
     pub fn update(&self, session_id: String, image: DynamicImage, frame_index: u64) {
-        self.cleanup();
         if let Ok(mut map) = self.sessions.lock() {
+            Self::cleanup_map(&mut map);
             map.insert(
                 session_id,
                 SessionRecord {
@@ -186,12 +190,18 @@ pub fn get_session_tool_definition() -> ToolDefinition {
 
 /// Execute the `capture_session` MCP tool.
 pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallResult {
-    let session_id = arguments
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default")
-        .trim()
-        .to_string();
+    let session_id = {
+        let raw = arguments
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .trim();
+        if raw.is_empty() {
+            "default".to_string()
+        } else {
+            raw.chars().take(128).collect()
+        }
+    };
 
     let reset_flag = arguments
         .get("reset")

@@ -256,15 +256,21 @@ pub fn find_template_matches(
                 let sum_sq = canvas.query_sum_sq(x, y, t_w, t_h);
                 let var = sum_sq - (sum * sum) / prep_template.active_count;
 
-                let mut cross = 0.0f64;
-                for ty in 0..t_h {
-                    let src_row = (y + ty) * target_w + x;
-                    let tpl_row = ty * t_w;
-                    for tx in 0..t_w {
-                        cross += canvas.pixels[src_row + tx] * prep_template.normalized_pixels[tpl_row + tx];
+                if var <= 1e-4 {
+                    (var, 0.0)
+                } else {
+                    let mut cross = 0.0f64;
+                    for ty in 0..t_h {
+                        let src_start = (y + ty) * target_w + x;
+                        let tpl_start = ty * t_w;
+                        let src_slice = &canvas.pixels[src_start..src_start + t_w];
+                        let tpl_slice = &prep_template.normalized_pixels[tpl_start..tpl_start + t_w];
+                        for (s, t) in src_slice.iter().zip(tpl_slice.iter()) {
+                            cross += s * t;
+                        }
                     }
+                    (var, cross)
                 }
-                (var, cross)
             } else {
                 let mut p_sum = 0.0f64;
                 let mut p_sum_sq = 0.0f64;
@@ -316,15 +322,22 @@ pub fn find_template_matches(
                         let sum = canvas.query_sum(fx, fy, t_w, t_h);
                         let sum_sq = canvas.query_sum_sq(fx, fy, t_w, t_h);
                         let var = sum_sq - (sum * sum) / prep_template.active_count;
-                        let mut cross = 0.0f64;
-                        for ty in 0..t_h {
-                            let src_row = (fy + ty) * target_w + fx;
-                            let tpl_row = ty * t_w;
-                            for tx in 0..t_w {
-                                cross += canvas.pixels[src_row + tx] * prep_template.normalized_pixels[tpl_row + tx];
+
+                        if var <= 1e-4 {
+                            (var, 0.0)
+                        } else {
+                            let mut cross = 0.0f64;
+                            for ty in 0..t_h {
+                                let src_start = (fy + ty) * target_w + fx;
+                                let tpl_start = ty * t_w;
+                                let src_slice = &canvas.pixels[src_start..src_start + t_w];
+                                let tpl_slice = &prep_template.normalized_pixels[tpl_start..tpl_start + t_w];
+                                for (s, t) in src_slice.iter().zip(tpl_slice.iter()) {
+                                    cross += s * t;
+                                }
                             }
+                            (var, cross)
                         }
-                        (var, cross)
                     } else {
                         let mut p_sum = 0.0f64;
                         let mut p_sum_sq = 0.0f64;

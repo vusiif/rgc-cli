@@ -174,10 +174,16 @@ pub fn apply_redaction(
                 .resize_exact(sub_w, sub_h, image::imageops::FilterType::Triangle)
                 .to_rgba8();
 
-            for py in 0..sub_h {
-                for px in 0..sub_w {
-                    img.put_pixel(x0 + px, y0 + py, *blurred.get_pixel(px, py));
-                }
+            let b_raw = blurred.as_raw();
+            let img_raw = img.as_mut();
+            let b_stride = (sub_w as usize) * 4;
+            let img_stride = (img_w as usize) * 4;
+            for py in 0..sub_h as usize {
+                let b_start = py * b_stride;
+                let b_end = b_start + b_stride;
+                let img_start = (y0 as usize + py) * img_stride + (x0 as usize) * 4;
+                let img_end = img_start + b_stride;
+                img_raw[img_start..img_end].copy_from_slice(&b_raw[b_start..b_end]);
             }
         }
     }
@@ -449,11 +455,14 @@ pub fn calculate_image_diff(
                 continue;
             }
 
-            for x in 0..cw {
-                let px = (x as usize) * 4;
-                let is_diff = (0..4).any(|c| c_row[px + c].abs_diff(r_row[px + c]) > threshold);
+            for (x_usize, (cp, rp)) in c_row.chunks_exact(4).zip(r_row.chunks_exact(4)).enumerate() {
+                let is_diff = cp[0].abs_diff(rp[0]) > threshold
+                    || cp[1].abs_diff(rp[1]) > threshold
+                    || cp[2].abs_diff(rp[2]) > threshold
+                    || cp[3].abs_diff(rp[3]) > threshold;
 
                 if is_diff {
+                    let x = x_usize as u32;
                     changed_pixels += 1;
                     min_x = min_x.min(x);
                     max_x = max_x.max(x);
