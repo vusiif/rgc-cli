@@ -5,6 +5,21 @@ All notable changes to `rgc-cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] - 2026-11-23
+
+### Added
+- **Stateful Incremental Screen Session (`capture_session` MCP Tool, `src/mcp/session.rs`)**:
+  - In-memory session store (`SessionManager`) caching previous visual states across calls with 15-minute TTL eviction and LRU capacity protection.
+  - Automatically calculates visual deltas against the session baseline; returns cropped diff deltas when changes occur, and omits heavy base64 payloads entirely when unchanged, slashing agent vision token consumption and disk I/O.
+- **Continuous Watch Mode (`--watch [INTERVAL_MS]`)**:
+  - Periodically polls the screen and emits structured change notifications only when visual differences exceed threshold and minimum percentage change.
+  - Supports `--json` for newline-delimited event streams (`WatchEventJson`), `--output-dir` / `-o` for saving visual change snapshots, and `--watch-count` / `--watch-timeout` for bounded automated workflows.
+- **Privacy Profiles & Configuration File Support (`rgc.toml`, `src/config.rs`)**:
+  - Automatically loads configuration from `--config <PATH>`, `./rgc.toml`, or `~/.config/rgc/config.toml`.
+  - Enables project-level and user-level default sensitive window masking (`mask_windows`), coordinate region redactions, security directory white-listing, and default capture parameters.
+
+---
+
 ## [2.7.0] - 2026-11-23
 
 ### Added

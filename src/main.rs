@@ -4,6 +4,7 @@ pub mod action;
 pub mod api;
 pub mod capture;
 pub mod cli;
+pub mod config;
 pub mod coords;
 pub mod doctor;
 pub mod mcp;
@@ -118,7 +119,12 @@ fn capture_target(args: &Cli) -> Result<RawCaptured, ApiError> {
     }
 }
 
-fn run(args: Cli) -> Result<(), ApiError> {
+fn run(mut args: Cli) -> Result<(), ApiError> {
+    // Load configuration file if present
+    if let Some(cfg) = config::RgcConfig::load(args.config.as_deref()) {
+        apply_config_to_cli(&mut args, &cfg);
+    }
+
     // 0. Handle shell completions generation
     if let Some(shell) = args.completions {
         use clap::CommandFactory;
@@ -287,12 +293,27 @@ fn run(args: Cli) -> Result<(), ApiError> {
         .with_suggestion("Provide a target output path (e.g. -o recording.gif or --output-dir ./frames)."));
     }
 
+    if is_stdout && args.watch.is_some() && !args.json {
+        return Err(ApiError::new(
+            ErrorCode::BadArgs,
+            "Cannot stream raw binary images to stdout in '--watch' mode. \
+             Use '--json' to stream newline-delimited event JSON, or specify a directory via '--output-dir'.",
+        )
+        .with_stage("argument_validation")
+        .with_suggestion("Add '--json' or '--output-dir <DIR>' when using '--watch'."));
+    }
+
     // Infer image format and validate against file extension if explicit format provided
     let format = output::validate_and_infer_format(&destination, args.format)?;
 
     // 2.5 Handle continuous recording if requested
     if let Some(record_secs) = args.record {
         return run_recording(&args, record_secs, destination);
+    }
+
+    // 2.6 Handle watch mode if requested
+    if let Some(interval_ms) = args.watch {
+        return run_watch_mode(&args, interval_ms, destination);
     }
 
     // 3. Handle delayed capture if requested
@@ -776,5 +797,162 @@ fn print_json_success<T: serde::Serialize>(data: T) -> Result<(), ApiError> {
         )
     })?;
     println!("{}", json_str);
+    Ok(())
+}
+
+fn apply_config_to_cli(args: &mut Cli, cfg: &config::RgcConfig) {
+    if args.mask_window.is_empty() {
+        for w in &cfg.privacy.mask_windows {
+            if let Ok(mw) = w.parse::<cli::MaskWindow>() {
+                args.mask_window.push(mw);
+            }
+        }
+    }
+
+    if args.mask.is_empty() {
+        for r in &cfg.privacy.mask_regions {
+            if let Ok(mr) = r.parse::<cli::MaskRegion>() {
+                args.mask.push(mr);
+            }
+        }
+    }
+
+    if !args.allow_missing_mask {
+        if let Some(amm) = cfg.privacy.allow_missing_mask {
+            args.allow_missing_mask = amm;
+        }
+    }
+
+    if args.scale.is_none() {
+        args.scale = cfg.defaults.scale;
+    }
+
+    if args.max_dimension.is_none() {
+        args.max_dimension = cfg.security.max_dimension;
+    }
+
+    if !args.cursor {
+        if let Some(c) = cfg.defaults.cursor {
+            args.cursor = c;
+        }
+    }
+
+    if !cfg.security.allowed_output_dirs.is_empty()
+        && std::env::var("RGC_ALLOWED_OUTPUT_DIRS").is_err()
+    {
+        std::env::set_var(
+            "RGC_ALLOWED_OUTPUT_DIRS",
+            cfg.security.allowed_output_dirs.join(","),
+        );
+    }
+}
+
+/// Structured JSON representation of a visual change event in watch mode.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchEventJson {
+    pub event: &'static str,
+    pub index: u32,
+    pub changed_pixels: u64,
+    pub changed_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<transform::DiffBBox>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub timestamp: String,
+}
+
+fn run_watch_mode(
+    args: &Cli,
+    interval_ms: u64,
+    destination: OutputDestination,
+) -> Result<(), ApiError> {
+    let interval = Duration::from_millis(interval_ms.max(20));
+    let start_time = Instant::now();
+    let timeout = args.watch_timeout.map(|s| Duration::from_secs_f32(s.max(0.1)));
+
+    if !args.quiet && !args.json {
+        println!(
+            "Starting watch mode (interval: {} ms, threshold: {}, min_change: {:.2}%)...",
+            interval_ms, args.watch_threshold, args.watch_min_percent
+        );
+    }
+
+    let mut baseline = capture_target(args)?;
+    let mut event_count = 0u32;
+    let format = output::validate_and_infer_format(&destination, args.format)?;
+
+    loop {
+        if let Some(t) = timeout {
+            if start_time.elapsed() >= t {
+                if !args.quiet && !args.json {
+                    println!("Watch mode timed out after {:?}", t);
+                }
+                break;
+            }
+        }
+
+        sleep(interval);
+
+        let current = capture_target(args)?;
+        let diff = output::calculate_image_diff(&current.image, &baseline.image, args.watch_threshold);
+
+        if diff.changed && diff.changed_percent >= args.watch_min_percent {
+            event_count += 1;
+            let now_str = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+
+            let saved_path_str = match &destination {
+                OutputDestination::Directory(dir) => {
+                    let filename = format!(
+                        "change_{:04}_{}.{}",
+                        event_count,
+                        chrono::Local::now().format("%H%M%S"),
+                        format.extension()
+                    );
+                    let out_path = dir.join(filename);
+                    let dest = OutputDestination::File(out_path.clone());
+                    output::save_image(&current.image, &dest, format, args.quality)?;
+                    Some(out_path.display().to_string())
+                }
+                OutputDestination::File(f) => {
+                    output::save_image(&current.image, &destination, format, args.quality)?;
+                    Some(f.display().to_string())
+                }
+                _ => None,
+            };
+
+            if args.json {
+                let event_json = WatchEventJson {
+                    event: "change",
+                    index: event_count,
+                    changed_pixels: diff.changed_pixels,
+                    changed_percent: diff.changed_percent,
+                    bbox: diff.bbox,
+                    path: saved_path_str,
+                    timestamp: now_str,
+                };
+                if let Ok(json_line) = serde_json::to_string(&event_json) {
+                    println!("{}", json_line);
+                }
+            } else if !args.quiet {
+                println!(
+                    "[{}] Change #{} detected: {:.2}% pixels changed, bbox: {:?}",
+                    now_str, event_count, diff.changed_percent, diff.bbox
+                );
+            }
+
+            baseline = current;
+
+            if let Some(limit) = args.watch_count {
+                if event_count >= limit {
+                    if !args.quiet && !args.json {
+                        println!("Reached target change count ({}), exiting watch mode.", limit);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     Ok(())
 }

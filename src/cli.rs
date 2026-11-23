@@ -519,6 +519,37 @@ pub struct Cli {
     #[arg(long = "verify-threshold", value_name = "1-255", default_value_t = 10)]
     pub verify_threshold: u8,
 
+    /// Optional path to configuration file (defaults to ./rgc.toml or ~/.config/rgc/config.toml)
+    #[arg(long = "config", value_name = "PATH")]
+    pub config: Option<std::path::PathBuf>,
+
+    /// Continuous watch mode: poll screen periodically and emit events/files on visual change.
+    /// Optional value specifies check interval in milliseconds (default: 500 ms).
+    #[arg(
+        long = "watch",
+        value_name = "INTERVAL_MS",
+        num_args = 0..=1,
+        default_missing_value = "500",
+        conflicts_with_all = ["record", "completions", "doctor", "mcp"]
+    )]
+    pub watch: Option<u64>,
+
+    /// Sensitivity threshold (0-255) for detecting visual changes in --watch mode (default: 16)
+    #[arg(long = "watch-threshold", value_name = "N", default_value_t = 16)]
+    pub watch_threshold: u8,
+
+    /// Minimum percent of changed pixels (0.01 - 100.0) required to trigger a --watch event (default: 0.05%)
+    #[arg(long = "watch-min-percent", value_name = "PERCENT", default_value_t = 0.05)]
+    pub watch_min_percent: f64,
+
+    /// Maximum number of change events to trigger before terminating --watch mode (default: infinite)
+    #[arg(long = "watch-count", value_name = "COUNT")]
+    pub watch_count: Option<u32>,
+
+    /// Timeout in seconds before automatically terminating --watch mode
+    #[arg(long = "watch-timeout", value_name = "SECS")]
+    pub watch_timeout: Option<f32>,
+
     /// Open captured screenshot file with system default viewer
     #[arg(
         long = "open",
@@ -1036,5 +1067,44 @@ mod tests {
 
         // CLI conflict with diff-with
         assert!(Cli::try_parse_from(["rgc-cli", "--record", "5", "--diff-with", "ref.png"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parsing_watch_and_config() {
+        // Watch defaults
+        let cli_watch_default = Cli::try_parse_from(["rgc-cli", "--watch"]).unwrap();
+        assert_eq!(cli_watch_default.watch, Some(500));
+        assert_eq!(cli_watch_default.watch_threshold, 16);
+        assert_eq!(cli_watch_default.watch_min_percent, 0.05);
+
+        // Custom watch parameters and config path
+        let cli_watch = Cli::try_parse_from([
+            "rgc-cli",
+            "--config",
+            "custom_rgc.toml",
+            "--watch",
+            "200",
+            "--watch-threshold",
+            "25",
+            "--watch-min-percent",
+            "0.1",
+            "--watch-count",
+            "5",
+            "--watch-timeout",
+            "10.0",
+        ])
+        .unwrap();
+
+        assert_eq!(cli_watch.config, Some(std::path::PathBuf::from("custom_rgc.toml")));
+        assert_eq!(cli_watch.watch, Some(200));
+        assert_eq!(cli_watch.watch_threshold, 25);
+        assert_eq!(cli_watch.watch_min_percent, 0.1);
+        assert_eq!(cli_watch.watch_count, Some(5));
+        assert_eq!(cli_watch.watch_timeout, Some(10.0));
+
+        // Conflict: --watch with --record
+        assert!(Cli::try_parse_from(["rgc-cli", "--watch", "--record", "5.0"]).is_err());
+        // Conflict: --watch with --doctor
+        assert!(Cli::try_parse_from(["rgc-cli", "--watch", "--doctor"]).is_err());
     }
 }

@@ -1,0 +1,491 @@
+#![forbid(unsafe_code)]
+
+//! Stateful screen session management for AI Vision Agents.
+//!
+//! Maintains in-memory frame baselines across calls with automatic TTL eviction,
+//! eliminating redundant image disk roundtrips and drastically reducing multimodal token consumption.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use image::DynamicImage;
+use serde::{Deserialize, Serialize};
+
+use crate::capture;
+use crate::cli::CoordMode;
+use crate::coords::CoordinateSpaceInfo;
+use crate::mcp::base64::base64_encode;
+use crate::mcp::tools::validate_mcp_output_path;
+use crate::mcp::types::{ToolCallResult, ToolContent, ToolDefinition};
+use crate::output::{self, OutputDestination};
+use crate::pipeline::{execute_image_pipeline, PipelineOptions};
+use crate::transform::DiffBBox;
+
+/// Maximum duration an idle session remains valid in memory (15 minutes).
+pub const SESSION_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Maximum concurrent active visual sessions retained in memory.
+pub const MAX_CONCURRENT_SESSIONS: usize = 16;
+
+#[derive(Debug, Clone)]
+pub struct SessionRecord {
+    pub last_image: DynamicImage,
+    pub frame_index: u64,
+    pub last_accessed: Instant,
+}
+
+#[derive(Clone, Default)]
+pub struct SessionManager {
+    sessions: Arc<Mutex<HashMap<String, SessionRecord>>>,
+}
+
+static GLOBAL_SESSIONS: OnceLock<SessionManager> = OnceLock::new();
+
+pub fn get_session_manager() -> &'static SessionManager {
+    GLOBAL_SESSIONS.get_or_init(SessionManager::new)
+}
+
+impl SessionManager {
+    pub fn new() -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Prune expired sessions older than TTL and evict oldest if capacity exceeded.
+    pub fn cleanup(&self) {
+        if let Ok(mut map) = self.sessions.lock() {
+            let now = Instant::now();
+            map.retain(|_, record| now.duration_since(record.last_accessed) < SESSION_TTL);
+
+            while map.len() >= MAX_CONCURRENT_SESSIONS {
+                if let Some(oldest_key) = map
+                    .iter()
+                    .min_by_key(|(_, r)| r.last_accessed)
+                    .map(|(k, _)| k.clone())
+                {
+                    map.remove(&oldest_key);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn get(&self, session_id: &str) -> Option<SessionRecord> {
+        self.cleanup();
+        let map = self.sessions.lock().ok()?;
+        map.get(session_id).cloned()
+    }
+
+    pub fn update(&self, session_id: String, image: DynamicImage, frame_index: u64) {
+        self.cleanup();
+        if let Ok(mut map) = self.sessions.lock() {
+            map.insert(
+                session_id,
+                SessionRecord {
+                    last_image: image,
+                    frame_index,
+                    last_accessed: Instant::now(),
+                },
+            );
+        }
+    }
+
+    pub fn reset(&self, session_id: &str) {
+        if let Ok(mut map) = self.sessions.lock() {
+            map.remove(session_id);
+        }
+    }
+}
+
+/// Structured JSON summary returned by `capture_session`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionResponseJson {
+    pub session_id: String,
+    pub frame_index: u64,
+    pub is_first_frame: bool,
+    pub changed: bool,
+    pub changed_pixels: u64,
+    pub changed_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<DiffBBox>,
+    pub width: u32,
+    pub height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinates: Option<CoordinateSpaceInfo>,
+}
+
+/// Returns the MCP tool definition for `capture_session`.
+pub fn get_session_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "capture_session".to_string(),
+        description: "Stateful incremental screen capture session for AI Agents. Caches prior visual state in memory to detect changes and return cropped deltas, eliminating redundant disk I/O and saving vision tokens.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "sessionId": {
+                    "type": "string",
+                    "description": "Unique session identifier for the agent (e.g. 'agent-01'). Defaults to 'default'."
+                },
+                "reset": {
+                    "type": "boolean",
+                    "description": "Reset session history and establish a new baseline from current screen state. Defaults to false."
+                },
+                "diffOnly": {
+                    "type": "boolean",
+                    "description": "When true and visual change occurs, return cropped diff image delta instead of full screen to save vision tokens. If unchanged, omits heavy base64 data. Defaults to true."
+                },
+                "threshold": {
+                    "type": "integer",
+                    "description": "Per-pixel color delta threshold (0-255, default: 16) for change detection."
+                },
+                "monitor": {
+                    "type": "integer",
+                    "description": "0-indexed monitor index. Captures primary display if omitted."
+                },
+                "window": {
+                    "type": "string",
+                    "description": "Window title substring or ID to target."
+                },
+                "scale": {
+                    "type": "number",
+                    "description": "Downscale factor between 0.01 and 1.0 (e.g. 0.5)."
+                },
+                "maxDimension": {
+                    "type": "integer",
+                    "description": "Maximum width/height in pixels."
+                },
+                "cursor": {
+                    "type": "boolean",
+                    "description": "Render mouse cursor overlay on image."
+                },
+                "highlightCursor": {
+                    "type": "boolean",
+                    "description": "Render prominent cursor halo ring."
+                },
+                "som": {
+                    "type": "boolean",
+                    "description": "Detect interactive UI elements and overlay Set-of-Mark numbered badges."
+                },
+                "outputPath": {
+                    "type": "string",
+                    "description": "Optional file path to save output."
+                },
+                "allowOverwrite": {
+                    "type": "boolean",
+                    "description": "Allow overwriting existing file at outputPath."
+                }
+            },
+            "additionalProperties": false
+        }),
+    }
+}
+
+/// Execute the `capture_session` MCP tool.
+pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallResult {
+    let session_id = arguments
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .trim()
+        .to_string();
+
+    let reset_flag = arguments
+        .get("reset")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let diff_only = arguments
+        .get("diffOnly")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let threshold = arguments
+        .get("threshold")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(16)
+        .clamp(1, 255) as u8;
+
+    let monitor = arguments
+        .get("monitor")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+
+    let window_query = arguments.get("window").and_then(|v| v.as_str());
+
+    let scale = arguments.get("scale").and_then(|v| v.as_f64());
+    if let Some(s) = scale {
+        if !s.is_finite() || s <= 0.0 || s > 1.0 {
+            return ToolCallResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Invalid scale '{s}': expected a number between 0.01 and 1.0"),
+                }],
+                is_error: true,
+            };
+        }
+    }
+
+    let max_dimension = arguments
+        .get("maxDimension")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+    if let Some(d) = max_dimension {
+        if d == 0 || d > 16384 {
+            return ToolCallResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Invalid maxDimension: must be between 1 and 16384 (got {d})"),
+                }],
+                is_error: true,
+            };
+        }
+    }
+
+    let cursor_flag = arguments
+        .get("cursor")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let highlight_cursor_flag = arguments
+        .get("highlightCursor")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let som_flag = arguments
+        .get("som")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let allow_overwrite = arguments
+        .get("allowOverwrite")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let output_path = match arguments.get("outputPath").and_then(|v| v.as_str()) {
+        Some(s) => match validate_mcp_output_path(s, &["png", "webp", "jpeg", "jpg"], allow_overwrite) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Invalid outputPath: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        },
+        None => None,
+    };
+
+    // Step 1: Capture current screen target
+    let captured = if let Some(win) = window_query {
+        capture::capture_window_with_details(win, None).map(|c| {
+            (
+                c.image,
+                c.scale_factor,
+                c.crop_offset,
+                Some(c.window_origin),
+            )
+        })
+    } else {
+        capture::capture_screen_with_details(monitor, None, CoordMode::Logical).map(|c| {
+            (
+                c.image,
+                c.scale_factor,
+                c.crop_offset,
+                Some(c.monitor_origin),
+            )
+        })
+    };
+
+    let (raw_image, scale_factor, crop_offset, monitor_origin) = match captured {
+        Ok(c) => c,
+        Err(e) => {
+            return ToolCallResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Session capture failed: {e}"),
+                }],
+                is_error: true,
+            };
+        }
+    };
+
+    // Step 2: Execute base image pipeline (scale, cursor)
+    let pipeline_opts = PipelineOptions {
+        cursor: cursor_flag,
+        highlight_cursor: highlight_cursor_flag,
+        scale,
+        max_dimension,
+        som: som_flag,
+        ..Default::default()
+    };
+
+    let pipeline_res = match execute_image_pipeline(
+        raw_image,
+        scale_factor,
+        crop_offset,
+        monitor_origin,
+        &pipeline_opts,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            return ToolCallResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Pipeline execution error: {}", e.message),
+                }],
+                is_error: true,
+            };
+        }
+    };
+
+    let current_img = pipeline_res.image;
+    let manager = get_session_manager();
+
+    if reset_flag {
+        manager.reset(&session_id);
+    }
+
+    let prior_session = manager.get(&session_id);
+
+    let (is_first_frame, frame_index, changed, changed_pixels, changed_percent, bbox, output_img) =
+        match prior_session {
+            None => {
+                // First frame of session: establish baseline
+                manager.update(session_id.clone(), current_img.clone(), 1);
+                (true, 1u64, false, 0u64, 0.0f64, None, current_img)
+            }
+            Some(record) => {
+                let diff = output::calculate_image_diff(&current_img, &record.last_image, threshold);
+                let next_frame_idx = record.frame_index + 1;
+
+                if diff.changed && (diff.changed_pixels >= 50 || diff.changed_percent >= 0.05) {
+                    let out_img = if diff_only {
+                        if let Some(ref b) = diff.bbox {
+                            output::crop_to_diff_bbox(current_img.clone(), b, 8)
+                        } else {
+                            current_img.clone()
+                        }
+                    } else {
+                        current_img.clone()
+                    };
+
+                    manager.update(session_id.clone(), current_img, next_frame_idx);
+                    (
+                        false,
+                        next_frame_idx,
+                        true,
+                        diff.changed_pixels,
+                        diff.changed_percent,
+                        diff.bbox,
+                        out_img,
+                    )
+                } else {
+                    // No visual change: update access time, return unchanged notice without heavy image
+                    manager.update(session_id.clone(), record.last_image, next_frame_idx);
+                    (
+                        false,
+                        next_frame_idx,
+                        false,
+                        diff.changed_pixels,
+                        diff.changed_percent,
+                        None,
+                        current_img,
+                    )
+                }
+            }
+        };
+
+    let mut content = Vec::new();
+
+    let response_json = SessionResponseJson {
+        session_id,
+        frame_index,
+        is_first_frame,
+        changed,
+        changed_pixels,
+        changed_percent,
+        bbox,
+        width: output_img.width(),
+        height: output_img.height(),
+        coordinates: Some(pipeline_res.coordinates),
+    };
+
+    if let Ok(json_text) = serde_json::to_string_pretty(&response_json) {
+        content.push(ToolContent::Text {
+            text: format!("Session State:\n{json_text}"),
+        });
+    }
+
+    if let Some(ref elems) = pipeline_res.elements {
+        if let Ok(elems_json) = serde_json::to_string_pretty(elems) {
+            content.push(ToolContent::Text {
+                text: format!("Detected UI Elements:\n{elems_json}"),
+            });
+        }
+    }
+
+    // Save to disk if requested
+    if let Some(ref path) = output_path {
+        let destination = OutputDestination::File(path.clone());
+        if let Err(e) = output::save_image(
+            &output_img,
+            &destination,
+            crate::cli::ImageFormat::Png,
+            None,
+        ) {
+            return ToolCallResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Failed to save session image: {e}"),
+                }],
+                is_error: true,
+            };
+        }
+    }
+
+    // Attach base64 image: on first frame, or on visual changes, or when diffOnly is false
+    if is_first_frame || changed || !diff_only {
+        if let Ok(bytes) = output::encode_image_bytes(&output_img, crate::cli::ImageFormat::Png, None) {
+            let b64 = base64_encode(&bytes);
+            content.push(ToolContent::Image {
+                data: b64,
+                mime_type: "image/png".to_string(),
+            });
+        }
+    }
+
+    ToolCallResult {
+        content,
+        is_error: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_manager_lifecycle() {
+        let manager = SessionManager::new();
+        let img1 = DynamicImage::new_rgba8(100, 100);
+
+        assert!(manager.get("test-01").is_none());
+
+        manager.update("test-01".to_string(), img1.clone(), 1);
+        let rec = manager.get("test-01").expect("Session should exist");
+        assert_eq!(rec.frame_index, 1);
+
+        manager.update("test-01".to_string(), img1, 2);
+        let rec2 = manager.get("test-01").expect("Session should exist");
+        assert_eq!(rec2.frame_index, 2);
+
+        manager.reset("test-01");
+        assert!(manager.get("test-01").is_none());
+    }
+
+    #[test]
+    fn test_session_tool_definition() {
+        let def = get_session_tool_definition();
+        assert_eq!(def.name, "capture_session");
+        assert!(def.description.contains("Stateful"));
+    }
+}

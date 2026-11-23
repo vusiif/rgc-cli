@@ -3,12 +3,14 @@ pub mod base64;
 pub mod prompts;
 pub mod record;
 pub mod resources;
+pub mod session;
 pub mod tools;
 pub mod types;
 
 pub use base64::*;
 pub use prompts::*;
 pub use resources::*;
+pub use session::*;
 pub use tools::*;
 pub use types::*;
 
@@ -736,6 +738,7 @@ mod tests {
         assert!(res.contains("record_screen"));
         assert!(res.contains("capture_screen"));
         assert!(res.contains("verify_action"));
+        assert!(res.contains("capture_session"));
         assert!(res.contains("cursor"));
         assert!(res.contains("highlightCursor"));
         assert!(res.contains("som"));
@@ -810,5 +813,26 @@ mod tests {
         let resp = handle_mcp_message(req).expect("response expected");
         assert!(resp.contains(r#""isError":true"#));
         assert!(resp.contains("Invalid maxDimension"));
+    }
+
+    #[test]
+    fn test_handle_mcp_tool_call_capture_session_invalid_params() {
+        // Invalid scale
+        let req1 = r#"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"capture_session","arguments":{"scale":2.5}}}"#;
+        let resp1 = handle_mcp_message(req1).expect("response expected");
+        assert!(resp1.contains(r#""isError":true"#));
+        assert!(resp1.contains("Invalid scale"));
+
+        // Invalid max dimension
+        let req2 = r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"capture_session","arguments":{"maxDimension":0}}}"#;
+        let resp2 = handle_mcp_message(req2).expect("response expected");
+        assert!(resp2.contains(r#""isError":true"#));
+        assert!(resp2.contains("Invalid maxDimension"));
+
+        // Nonexistent window
+        let req3 = r#"{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"capture_session","arguments":{"window":"nonexistent_session_win_9999"}}}"#;
+        let resp3 = handle_mcp_message(req3).expect("response expected");
+        assert!(resp3.contains(r#""isError":true"#));
+        assert!(resp3.contains("Session capture failed") || resp3.contains("No window found"));
     }
 }

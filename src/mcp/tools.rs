@@ -223,6 +223,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
         },
+        crate::mcp::session::get_session_tool_definition(),
     ]
 }
 
@@ -253,6 +254,7 @@ pub fn execute_tool_call(name: &str, arguments: &serde_json::Value) -> ToolCallR
         "capture_screen" => execute_capture_tool(arguments),
         "record_screen" => execute_record_tool(arguments),
         "verify_action" => execute_verify_action_tool(arguments),
+        "capture_session" => execute_capture_session_tool(arguments),
         _ => ToolCallResult {
             content: vec![ToolContent::Text {
                 text: format!("Unknown tool name: '{name}'"),
@@ -997,3 +999,4 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
 
 pub use crate::mcp::action::execute_verify_action_tool;
 pub use crate::mcp::record::execute_record_tool;
+pub use crate::mcp::session::execute_capture_session_tool;
