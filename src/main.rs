@@ -707,7 +707,39 @@ fn run_recording(
         );
     }
 
-    let mut frames = Vec::new();
+    let (_is_dir_output, dir_target, gif_target) = match destination {
+        OutputDestination::Directory(ref dir) => {
+            if !dir.exists() {
+                fs::create_dir_all(dir).map_err(|e| {
+                    ApiError::new(
+                        ErrorCode::SaveFailed,
+                        format!("Failed to create output directory: {e}"),
+                    )
+                })?;
+            }
+            (true, Some(dir.clone()), None)
+        }
+        OutputDestination::File(p) => (false, None, Some(p)),
+        _ => {
+            let filename = output::generate_default_filename(ImageFormat::Gif);
+            (false, None, Some(PathBuf::from(filename)))
+        }
+    };
+
+    let mut gif_stream = if let Some(ref path) = gif_target {
+        Some(output::GifStreamEncoder::create_file(path, fps).map_err(|e| {
+            ApiError::new(
+                ErrorCode::SaveFailed,
+                format!("Failed to initialize streaming GIF encoder: {e}"),
+            )
+        })?)
+    } else {
+        None
+    };
+
+    let mut frame_count = 0u32;
+    let mut stream_dims = (0u32, 0u32);
+
     while start_time.elapsed() < total_duration {
         let frame_start = Instant::now();
         let raw = capture_target(args)?;
@@ -788,7 +820,26 @@ fn run_recording(
             som::draw_som_overlay_in_place(&mut rgba, &elements);
         }
 
-        frames.push(DynamicImage::ImageRgba8(rgba));
+        stream_dims = (rgba.width(), rgba.height());
+        frame_count += 1;
+
+        if let Some(ref mut stream) = gif_stream {
+            stream.encode_frame(&rgba).map_err(|e| {
+                ApiError::new(
+                    ErrorCode::SaveFailed,
+                    format!("Failed to encode streaming GIF frame #{frame_count}: {e}"),
+                )
+            })?;
+        } else if let Some(ref dir) = dir_target {
+            let filename = format!("frame_{:04}.png", frame_count);
+            let frame_path = dir.join(filename);
+            output::save_image(
+                &DynamicImage::ImageRgba8(rgba),
+                &OutputDestination::File(frame_path),
+                ImageFormat::Png,
+                None,
+            )?;
+        }
 
         let elapsed = frame_start.elapsed();
         if elapsed < interval {
@@ -796,65 +847,31 @@ fn run_recording(
         }
     }
 
-    if frames.is_empty() {
+    if frame_count == 0 {
         return Err(ApiError::new(
             ErrorCode::CaptureFailed,
             "No frames captured during recording.",
         ));
     }
 
-    let frame_count = frames.len() as u32;
-    let (w, h) = (frames[0].width(), frames[0].height());
-    let mut file_size_bytes = None;
-    let saved_path_buf;
-
-    match destination {
-        OutputDestination::Directory(ref dir) => {
-            if !dir.exists() {
-                fs::create_dir_all(dir).map_err(|e| {
-                    ApiError::new(
-                        ErrorCode::SaveFailed,
-                        format!("Failed to create output directory: {e}"),
-                    )
-                })?;
-            }
-            for (idx, frame) in frames.iter().enumerate() {
-                let filename = format!("frame_{:04}.png", idx + 1);
-                let frame_path = dir.join(filename);
-                output::save_image(
-                    frame,
-                    &OutputDestination::File(frame_path),
-                    ImageFormat::Png,
-                    None,
-                )?;
-            }
-            saved_path_buf = dir.clone();
-            if !args.quiet && !args.json {
-                println!(
-                    "Recorded {} frames saved to directory: {}",
-                    frame_count,
-                    dir.display()
-                );
-            }
+    let (saved_path_buf, file_size_bytes) = if let Some(path) = gif_target {
+        drop(gif_stream);
+        let size = fs::metadata(&path).ok().map(|m| m.len());
+        if !args.quiet && !args.json {
+            println!("Recording saved as animated GIF: {}", path.display());
         }
-        _ => {
-            let gif_dest = match destination {
-                OutputDestination::File(p) => p,
-                _ => {
-                    let filename = output::generate_default_filename(ImageFormat::Gif);
-                    PathBuf::from(filename)
-                }
-            };
-            output::save_animated_gif(&frames, fps, &gif_dest)?;
-            if let Ok(meta) = fs::metadata(&gif_dest) {
-                file_size_bytes = Some(meta.len());
-            }
-            if !args.quiet && !args.json {
-                println!("Recording saved as animated GIF: {}", gif_dest.display());
-            }
-            saved_path_buf = gif_dest;
+        (path, size)
+    } else {
+        let dir = dir_target.unwrap();
+        if !args.quiet && !args.json {
+            println!(
+                "Recorded {} frames saved to directory: {}",
+                frame_count,
+                dir.display()
+            );
         }
-    }
+        (dir, None)
+    };
 
     if args.json {
         let rec_json = RecordResultJson {
@@ -863,8 +880,8 @@ fn run_recording(
             frame_count,
             duration_secs: start_time.elapsed().as_secs_f32(),
             fps,
-            width: w,
-            height: h,
+            width: stream_dims.0,
+            height: stream_dims.1,
             size_bytes: file_size_bytes,
         };
         print_json_success(rec_json)?;

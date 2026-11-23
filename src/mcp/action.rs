@@ -140,7 +140,25 @@ pub fn execute_verify_action_tool(arguments: &serde_json::Value) -> ToolCallResu
         .unwrap_or(false);
     let window_query = arguments.get("window").and_then(|v| v.as_str());
 
-    let output_path = arguments.get("outputPath").and_then(|v| v.as_str());
+    let allow_overwrite = arguments
+        .get("allowOverwrite")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let output_path = match arguments.get("outputPath").and_then(|v| v.as_str()) {
+        Some(s) => match crate::mcp::tools::validate_mcp_output_path(s, &["png", "jpg", "jpeg", "webp"], allow_overwrite) {
+            Ok(pb) => Some(pb),
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Invalid outputPath: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        },
+        None => None,
+    };
     let return_base64 = arguments
         .get("returnBase64")
         .and_then(|v| v.as_bool())
@@ -198,12 +216,12 @@ pub fn execute_verify_action_tool(arguments: &serde_json::Value) -> ToolCallResu
     let annotated_img = action::draw_action_overlays(after_img, &[click_marker], &[]);
 
     // 6. Handle output file saving if requested
-    if let Some(out_p) = output_path {
-        let dest = output::OutputDestination::File(std::path::PathBuf::from(out_p));
+    if let Some(ref out_p) = output_path {
+        let dest = output::OutputDestination::File(out_p.clone());
         if let Err(e) = output::save_image(&annotated_img, &dest, ImageFormat::Png, None) {
             return ToolCallResult {
                 content: vec![ToolContent::Text {
-                    text: format!("Failed to save annotated screenshot to '{out_p}': {e}"),
+                    text: format!("Failed to save annotated screenshot to '{}': {e}", out_p.display()),
                 }],
                 is_error: true,
             };

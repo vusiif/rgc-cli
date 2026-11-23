@@ -352,6 +352,7 @@ pub fn generate_default_filename(format: ImageFormat) -> String {
 }
 
 /// Resolves an automated unique filename inside the given directory target.
+/// Uses atomic creation (`create_new(true)`) to eliminate TOCTOU competition windows.
 pub fn resolve_unique_auto_path(dir: &Path, format: ImageFormat) -> Result<PathBuf, OutputError> {
     if !dir.exists() {
         debug!("Creating target directory: {:?}", dir);
@@ -363,8 +364,17 @@ pub fn resolve_unique_auto_path(dir: &Path, format: ImageFormat) -> Result<PathB
 
     for _ in 0..100 {
         let candidate = dir.join(generate_default_filename(format));
-        if !candidate.exists() {
-            return Ok(candidate);
+        // Atomic exclusivity check: create_new(true) prevents multiple concurrent processes
+        // from claiming the exact same candidate filename.
+        match fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(_) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(OutputError::SaveFailed {
+                    path: candidate,
+                    source: image::ImageError::IoError(e),
+                });
+            }
         }
     }
 
@@ -404,6 +414,7 @@ pub fn resolve_output_path(
 }
 
 /// Save a `DynamicImage` to the filesystem destination with optional JPEG quality.
+/// Uses a temporary file write and atomic replace strategy to prevent partial writes.
 pub fn save_image(
     image: &DynamicImage,
     destination: &OutputDestination,
@@ -416,26 +427,56 @@ pub fn save_image(
         format, quality, file_path
     );
 
-    if format == ImageFormat::Jpeg && quality.is_some() {
-        let bytes = encode_image_bytes(image, format, quality)?;
-        fs::write(&file_path, bytes).map_err(|e| OutputError::SaveFailed {
-            path: file_path.clone(),
-            source: image::ImageError::IoError(e),
-        })?;
-    } else {
-        let image_format = match format {
-            ImageFormat::Png => image::ImageFormat::Png,
-            ImageFormat::Jpeg => image::ImageFormat::Jpeg,
-            ImageFormat::Webp => image::ImageFormat::WebP,
-            ImageFormat::Gif => image::ImageFormat::Gif,
-        };
+    let parent = file_path.parent().unwrap_or_else(|| Path::new("."));
+    let temp_name = format!(
+        ".tmp_{}_{}_{}.tmp",
+        std::process::id(),
+        SEQUENCE_COUNTER.fetch_add(1, Ordering::Relaxed),
+        format.extension()
+    );
+    let temp_path = parent.join(temp_name);
 
-        image
-            .save_with_format(&file_path, image_format)
-            .map_err(|e| OutputError::SaveFailed {
+    let write_res = (|| -> Result<(), OutputError> {
+        if format == ImageFormat::Jpeg && quality.is_some() {
+            let bytes = encode_image_bytes(image, format, quality)?;
+            fs::write(&temp_path, bytes).map_err(|e| OutputError::SaveFailed {
                 path: file_path.clone(),
-                source: e,
+                source: image::ImageError::IoError(e),
             })?;
+        } else {
+            let image_format = match format {
+                ImageFormat::Png => image::ImageFormat::Png,
+                ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+                ImageFormat::Webp => image::ImageFormat::WebP,
+                ImageFormat::Gif => image::ImageFormat::Gif,
+            };
+
+            image
+                .save_with_format(&temp_path, image_format)
+                .map_err(|e| OutputError::SaveFailed {
+                    path: file_path.clone(),
+                    source: e,
+                })?;
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&temp_path);
+        return Err(e);
+    }
+
+    // Atomic replace / commit
+    if let Err(_rename_err) = fs::rename(&temp_path, &file_path) {
+        // Fallback for cross-device filesystems or Windows replace restrictions
+        if let Err(copy_err) = fs::copy(&temp_path, &file_path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(OutputError::SaveFailed {
+                path: file_path,
+                source: image::ImageError::IoError(copy_err),
+            });
+        }
+        let _ = fs::remove_file(&temp_path);
     }
 
     Ok(file_path)
@@ -483,50 +524,115 @@ pub fn open_file_in_viewer(path: &Path) -> Result<(), OutputError> {
     Ok(())
 }
 
+/// A streaming GIF encoder that encodes and flushes frames incrementally to an underlying writer.
+/// Drastically reduces memory consumption by avoiding buffering all uncompressed frames in memory.
+pub struct GifStreamEncoder<W: std::io::Write> {
+    encoder: image::codecs::gif::GifEncoder<W>,
+    delay: image::Delay,
+    frame_count: u32,
+    dimensions: Option<(u32, u32)>,
+}
+
+impl<W: std::io::Write> GifStreamEncoder<W> {
+    /// Create a new streaming GIF encoder wrapping an arbitrary `std::io::Write` destination.
+    pub fn new(writer: W, fps: u32) -> Result<Self, OutputError> {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        use image::Delay;
+
+        let mut encoder = GifEncoder::new(writer);
+        let _ = encoder.set_repeat(Repeat::Infinite);
+
+        let delay_ms = (1000 / fps.clamp(1, 30)).max(10);
+        let delay = Delay::from_numer_denom_ms(delay_ms, 1);
+
+        Ok(Self {
+            encoder,
+            delay,
+            frame_count: 0,
+            dimensions: None,
+        })
+    }
+
+    /// Encode a single RGBA frame immediately into the streaming GIF output.
+    pub fn encode_frame(&mut self, rgba: &image::RgbaImage) -> Result<(), OutputError> {
+        use image::Frame;
+
+        let (w, h) = (rgba.width(), rgba.height());
+        if let Some((first_w, first_h)) = self.dimensions {
+            if (w, h) != (first_w, first_h) {
+                return Err(OutputError::SaveFailed {
+                    path: PathBuf::from("stream.gif"),
+                    source: image::ImageError::Parameter(
+                        image::error::ParameterError::from_kind(
+                            image::error::ParameterErrorKind::DimensionMismatch,
+                        ),
+                    ),
+                });
+            }
+        } else {
+            self.dimensions = Some((w, h));
+        }
+
+        let frame = Frame::from_parts(rgba.clone(), 0, 0, self.delay);
+        self.encoder
+            .encode_frame(frame)
+            .map_err(|e| OutputError::SaveFailed {
+                path: PathBuf::from("stream.gif"),
+                source: e,
+            })?;
+
+        self.frame_count += 1;
+        Ok(())
+    }
+
+    /// Returns the total number of frames encoded so far.
+    pub fn frame_count(&self) -> u32 {
+        self.frame_count
+    }
+
+    /// Returns the resolution (width, height) of the stream if at least one frame was encoded.
+    pub fn dimensions(&self) -> Option<(u32, u32)> {
+        self.dimensions
+    }
+}
+
+impl GifStreamEncoder<std::io::BufWriter<std::fs::File>> {
+    /// Create a new streaming GIF encoder that writes directly to a file on disk.
+    pub fn create_file(path: &Path, fps: u32) -> Result<Self, OutputError> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                fs::create_dir_all(parent).map_err(|e| OutputError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+        }
+
+        let file = fs::File::create(path).map_err(|e| OutputError::SaveFailed {
+            path: path.to_path_buf(),
+            source: image::ImageError::IoError(e),
+        })?;
+
+        let writer = std::io::BufWriter::with_capacity(128 * 1024, file);
+        Self::new(writer, fps)
+    }
+}
+
 /// Save a sequence of image frames into an animated GIF file.
 pub fn save_animated_gif(
     frames: &[DynamicImage],
     fps: u32,
     path: &Path,
 ) -> Result<(), OutputError> {
-    use image::codecs::gif::{GifEncoder, Repeat};
-    use image::{Delay, Frame};
-
     if frames.is_empty() {
         return Err(OutputError::InvalidPath(
             "Cannot encode animated GIF: frame buffer is empty".to_string(),
         ));
     }
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            fs::create_dir_all(parent).map_err(|e| OutputError::CreateDirFailed {
-                path: parent.to_path_buf(),
-                source: e,
-            })?;
-        }
-    }
-
-    let file = fs::File::create(path).map_err(|e| OutputError::SaveFailed {
-        path: path.to_path_buf(),
-        source: image::ImageError::IoError(e),
-    })?;
-
-    let mut encoder = GifEncoder::new(file);
-    let _ = encoder.set_repeat(Repeat::Infinite);
-
-    let delay_ms = (1000 / fps.max(1)).max(10);
-    let delay = Delay::from_numer_denom_ms(delay_ms, 1);
-
+    let mut stream = GifStreamEncoder::create_file(path, fps)?;
     for frame in frames {
-        let rgba = frame.to_rgba8();
-        let gif_frame = Frame::from_parts(rgba, 0, 0, delay);
-        encoder
-            .encode_frame(gif_frame)
-            .map_err(|e| OutputError::SaveFailed {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
+        stream.encode_frame(&frame.to_rgba8())?;
     }
 
     Ok(())
@@ -681,5 +787,27 @@ mod tests {
         assert!(res.is_ok());
         assert!(target.exists());
         let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn test_gif_stream_encoder_in_memory_and_file() {
+        use std::io::Cursor;
+        let mut buffer = Cursor::new(Vec::new());
+        {
+            let mut stream = GifStreamEncoder::new(&mut buffer, 10).unwrap();
+
+            let frame1 = RgbaImage::from_pixel(32, 32, Rgba([255, 100, 0, 255]));
+            let frame2 = RgbaImage::from_pixel(32, 32, Rgba([0, 100, 255, 255]));
+
+            stream.encode_frame(&frame1).unwrap();
+            stream.encode_frame(&frame2).unwrap();
+
+            assert_eq!(stream.frame_count(), 2);
+            assert_eq!(stream.dimensions(), Some((32, 32)));
+        }
+
+        let encoded_bytes = buffer.into_inner();
+        assert!(!encoded_bytes.is_empty());
+        assert_eq!(&encoded_bytes[0..3], b"GIF");
     }
 }

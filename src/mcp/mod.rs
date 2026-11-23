@@ -359,6 +359,8 @@ pub fn run_mcp_loop(reader: impl BufRead, writer: impl Write + Send) -> std::io:
         // Background thread to poll subscribed resources and emit change notifications
         s.spawn(|| {
             let mut last_check = std::time::Instant::now();
+            let mut fingerprints: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+
             while running.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 if !running.load(Ordering::Relaxed) {
@@ -369,10 +371,21 @@ pub fn run_mcp_loop(reader: impl BufRead, writer: impl Write + Send) -> std::io:
                     let subs = get_subscriptions();
                     if !subs.is_empty() {
                         for uri in subs {
-                            let notif = create_resource_updated_notification(&uri);
-                            if let Ok(mut w) = writer_mutex.lock() {
-                                let _ = writeln!(w, "{notif}");
-                                let _ = w.flush();
+                            let current_fp = compute_resource_fingerprint(&uri);
+                            let has_changed = match current_fp {
+                                Some(fp) => match fingerprints.insert(uri.clone(), fp) {
+                                    Some(prev) => prev != fp,
+                                    None => false, // Seed initial fingerprint to prevent false positive notifications
+                                },
+                                None => true,
+                            };
+
+                            if has_changed {
+                                let notif = create_resource_updated_notification(&uri);
+                                if let Ok(mut w) = writer_mutex.lock() {
+                                    let _ = writeln!(w, "{notif}");
+                                    let _ = w.flush();
+                                }
                             }
                         }
                     }
@@ -738,5 +751,41 @@ mod tests {
         let res = handle_mcp_message(req).unwrap();
         assert!(res.contains(r#""isError":true"#));
         assert!(res.contains("Missing or invalid 'x' coordinate parameter"));
+    }
+
+    #[test]
+    fn test_validate_mcp_output_path_security() {
+        use crate::mcp::tools::validate_mcp_output_path;
+
+        // Disallow empty and null bytes
+        assert!(validate_mcp_output_path("", &["png"], false).is_err());
+        assert!(validate_mcp_output_path("test\0bad.png", &["png"], false).is_err());
+
+        // Disallow path traversal '..'
+        assert!(validate_mcp_output_path("../escape.png", &["png"], false).is_err());
+        assert!(validate_mcp_output_path("sub/../../escape.png", &["png"], false).is_err());
+
+        // Disallow invalid extensions (e.g. .exe, .sh)
+        assert!(validate_mcp_output_path("image.exe", &["png", "webp"], false).is_err());
+        assert!(validate_mcp_output_path("image.sh", &["png", "webp"], false).is_err());
+
+        // Allow valid extensions
+        assert!(validate_mcp_output_path("valid_shot.png", &["png", "webp"], false).is_ok());
+        assert!(validate_mcp_output_path("valid_shot.webp", &["png", "webp"], false).is_ok());
+
+        // Overwrite protection test
+        let temp_file = "test_mcp_overwrite_protect.png";
+        let _ = std::fs::write(temp_file, b"existing content");
+
+        // Denied when allow_overwrite is false
+        let err_res = validate_mcp_output_path(temp_file, &["png"], false);
+        assert!(err_res.is_err());
+        assert!(err_res.unwrap_err().contains("Target file already exists"));
+
+        // Allowed when allow_overwrite is true
+        let ok_res = validate_mcp_output_path(temp_file, &["png"], true);
+        assert!(ok_res.is_ok());
+
+        let _ = std::fs::remove_file(temp_file);
     }
 }

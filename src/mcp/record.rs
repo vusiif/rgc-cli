@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use crate::capture;
 use crate::cli::{CoordMode, MaskRegion, MaskWindow};
 use crate::mcp::base64::base64_encode;
@@ -118,7 +116,25 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .get("maxDimension")
         .and_then(|v| v.as_u64())
         .map(|v| v as u32);
-    let output_path = arguments.get("outputPath").and_then(|v| v.as_str());
+    let allow_overwrite = arguments
+        .get("allowOverwrite")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let output_path = match arguments.get("outputPath").and_then(|v| v.as_str()) {
+        Some(s) => match crate::mcp::tools::validate_mcp_output_path(s, &["gif"], allow_overwrite) {
+            Ok(pb) => Some(pb),
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Invalid outputPath: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        },
+        None => None,
+    };
     let return_base64 = arguments
         .get("returnBase64")
         .and_then(|v| v.as_bool())
@@ -170,7 +186,18 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let target_duration = std::time::Duration::from_secs_f32(duration_secs.clamp(0.1, 30.0));
     let start_time = std::time::Instant::now();
 
-    let mut frames = Vec::new();
+    let mut gif_bytes = Vec::new();
+    let mut stream = match output::GifStreamEncoder::new(&mut gif_bytes, fps) {
+        Ok(s) => s,
+        Err(e) => {
+            return ToolCallResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Failed to initialize streaming GIF encoder: {e}"),
+                }],
+                is_error: true,
+            };
+        }
+    };
 
     while start_time.elapsed() < target_duration {
         let frame_start = std::time::Instant::now();
@@ -272,7 +299,16 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
             scale,
             max_dimension,
         );
-        frames.push(frame_img);
+        let rgba = frame_img.into_rgba8();
+
+        if let Err(e) = stream.encode_frame(&rgba) {
+            return ToolCallResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Failed to encode streaming GIF frame: {e}"),
+                }],
+                is_error: true,
+            };
+        }
 
         let elapsed = frame_start.elapsed();
         if elapsed < interval {
@@ -280,7 +316,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         }
     }
 
-    if frames.is_empty() {
+    if stream.frame_count() == 0 {
         return ToolCallResult {
             content: vec![ToolContent::Text {
                 text: "No frames captured during recording.".to_string(),
@@ -289,37 +325,11 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         };
     }
 
-    let frame_count = frames.len();
-    let width = frames[0].width();
-    let height = frames[0].height();
+    let frame_count = stream.frame_count() as usize;
+    let (width, height) = stream.dimensions().unwrap_or((0, 0));
+    drop(stream);
 
-    // Encode to animated GIF in memory using zero-copy frame buffer consumption
-    let mut gif_bytes = Vec::new();
-    {
-        use image::codecs::gif::{GifEncoder, Repeat};
-        use image::{Delay, Frame};
-
-        let mut encoder = GifEncoder::new(&mut gif_bytes);
-        let _ = encoder.set_repeat(Repeat::Infinite);
-        let delay_ms = (1000 / fps.max(1)).max(10);
-        let delay = Delay::from_numer_denom_ms(delay_ms, 1);
-
-        for frame in frames {
-            let rgba = frame.into_rgba8();
-            let gif_frame = Frame::from_parts(rgba, 0, 0, delay);
-            if let Err(e) = encoder.encode_frame(gif_frame) {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Failed to encode GIF frame: {e}"),
-                    }],
-                    is_error: true,
-                };
-            }
-        }
-    }
-
-    if let Some(path_str) = output_path {
-        let p = Path::new(path_str);
+    if let Some(ref p) = output_path {
         if let Some(parent) = p.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 let _ = std::fs::create_dir_all(parent);
@@ -328,7 +338,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         if let Err(e) = std::fs::write(p, &gif_bytes) {
             return ToolCallResult {
                 content: vec![ToolContent::Text {
-                    text: format!("Failed to write recorded GIF to '{path_str}': {e}"),
+                    text: format!("Failed to write recorded GIF to '{}': {e}", p.display()),
                 }],
                 is_error: true,
             };
@@ -345,7 +355,8 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     }
 
     let save_msg = output_path
-        .map(|p| format!(" saved to '{p}'"))
+        .as_ref()
+        .map(|p| format!(" saved to '{}'", p.display()))
         .unwrap_or_default();
     content.push(ToolContent::Text {
         text: format!(

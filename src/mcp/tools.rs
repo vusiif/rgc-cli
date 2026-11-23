@@ -111,6 +111,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Optional file path to write image to disk. If omitted, image is returned as base64."
                     },
+                    "allowOverwrite": {
+                        "type": "boolean",
+                        "description": "Whether to allow overwriting an existing file at outputPath. Defaults to false to prevent accidental data loss."
+                    },
                     "returnBase64": {
                         "type": "boolean",
                         "description": "Whether to return image base64 data in the response. Defaults to true if outputPath is omitted."
@@ -259,6 +263,61 @@ pub fn execute_tool_call(name: &str, arguments: &serde_json::Value) -> ToolCallR
     }
 }
 
+/// Validate and sanitize output path requested by an MCP client to prevent path traversal
+/// and accidental data loss via unintended overwrites.
+pub fn validate_mcp_output_path(
+    path_str: &str,
+    allowed_extensions: &[&str],
+    allow_overwrite: bool,
+) -> Result<PathBuf, String> {
+    let trimmed = path_str.trim();
+    if trimmed.is_empty() {
+        return Err("Output path cannot be empty".to_string());
+    }
+
+    if trimmed.contains('\0') {
+        return Err("Output path contains illegal null bytes".to_string());
+    }
+
+    let p = Path::new(trimmed);
+
+    // Extension check
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if !allowed_extensions
+        .iter()
+        .any(|&allowed| allowed.eq_ignore_ascii_case(&ext))
+    {
+        return Err(format!(
+            "Invalid file extension '.{ext}'. Allowed extensions: {}",
+            allowed_extensions.join(", ")
+        ));
+    }
+
+    // Path traversal check: components must not escape using ParentDir ("..")
+    for comp in p.components() {
+        if matches!(comp, std::path::Component::ParentDir) {
+            return Err(format!(
+                "Path traversal ('..') is not permitted in outputPath: '{trimmed}'"
+            ));
+        }
+    }
+
+    // Overwrite check
+    if !allow_overwrite && p.exists() {
+        return Err(format!(
+            "Target file already exists: '{}'. Set allowOverwrite=true to permit overwriting.",
+            p.display()
+        ));
+    }
+
+    Ok(p.to_path_buf())
+}
+
 pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let monitor = if let Some(m_val) = arguments.get("monitor") {
         if let Some(idx) = m_val.as_u64() {
@@ -375,10 +434,25 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         }
     }
 
-    let output_path = arguments
-        .get("outputPath")
-        .and_then(|v| v.as_str())
-        .map(PathBuf::from);
+    let allow_overwrite = arguments
+        .get("allowOverwrite")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let output_path = match arguments.get("outputPath").and_then(|v| v.as_str()) {
+        Some(s) => match validate_mcp_output_path(s, &["png", "jpg", "jpeg", "webp"], allow_overwrite) {
+            Ok(pb) => Some(pb),
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Invalid outputPath: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        },
+        None => None,
+    };
 
     let return_base64 = arguments
         .get("returnBase64")

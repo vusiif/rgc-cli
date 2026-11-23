@@ -5,6 +5,31 @@ All notable changes to `rgc-cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.2] - 2026-11-23
+
+### Added
+- **Streaming GIF Recording Encoder (`GifStreamEncoder`)**:
+  - Replaced in-memory buffering of all raw capture frames with an incremental streaming encoder.
+  - Slashes peak recording memory footprint from $O(N)$ (hundreds of megabytes in long captures) to constant $O(1)$ by quantizing and flushing frames on-the-fly.
+  - Applied to both the CLI (`--record`) and MCP server (`record_screen`).
+- **TOCTOU-Free Atomic File Output**:
+  - Collision-free automatic filename resolution (`resolve_unique_auto_path`) now uses atomic `create_new(true)` handles, eliminating Time-of-Check to Time-of-Use race conditions.
+  - Image file writing (`save_image`) writes to temporary staging files first and commits atomically (via atomic rename with copy fallback), preventing corrupted partial outputs on interruption.
+- **MCP Output Path Security Hardening (`validate_mcp_output_path`)**:
+  - Output paths in MCP tools (`capture_screen`, `record_screen`, `verify_action`) are strictly validated against directory traversal (`..`), null bytes, and non-whitelisted extensions.
+  - Prevents unintended file overwrites unless explicitly enabled via `allowOverwrite`.
+- **Dynamic MCP Resource Notification Filtering**:
+  - Screen and diagnostic resource change notifications compute ultrafast (< 0.1ms) fingerprint hashes prior to dispatching updates.
+  - Suppresses noisy `notifications/resources/updated` broadcasts when screen contents and topologies are unchanged.
+- **Fail-Closed Window Privacy Redaction Policy**:
+  - Missing or minimized target windows in `--mask-window` fail closed with an explicit error to prevent accidental exposure of sensitive background pixels, with an optional `--allow-missing-mask` bypass.
+
+### Fixed
+- **Diff Crop Coordinate Mapping**:
+  - Corrected coordinate translation when combining diff highlighting (`--highlight-diff`) with cropped regions (`--crop`), accurately mapping global screen delta bounding boxes into cropped local frame coordinates.
+
+---
+
 ## [2.6.0] - 2026-11-21
 
 ### Added

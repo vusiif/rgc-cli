@@ -1,6 +1,6 @@
 [package]
 name = "rgc-cli"
-version = "2.6.0"
+version = "2.6.2"
 edition = "2021"
 rust-version = "1.75"
 description = "Fast, lightweight cross-platform screen capture CLI and MCP server in pure Rust"
