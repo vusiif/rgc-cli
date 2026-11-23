@@ -202,6 +202,15 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "integer",
                         "description": "Optional maximum number of UI elements to detect and mark (default: 50)."
                     },
+                    "accessibility": {
+                        "type": "boolean",
+                        "description": "Optional flag to fuse OS accessibility tree semantics (role, label, state) with detected Set-of-Mark elements."
+                    },
+                    "excludeWindows": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of window titles or patterns to exclude and blackout completely from capture."
+                    },
                     "clickAt": {
                         "description": "Optional click target coordinate(s) in 'X,Y' or 'X,Y,LABEL' format (string or array of strings) to overlay visual ripple and target indicators."
                     },
@@ -560,6 +569,18 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .get("somMaxElements")
         .and_then(|v| v.as_u64())
         .unwrap_or(50) as usize;
+    let accessibility_flag = arguments
+        .get("accessibility")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut exclude_windows = Vec::new();
+    if let Some(arr) = arguments.get("excludeWindows").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                exclude_windows.push(s.to_string());
+            }
+        }
+    }
     let diff_with_str = arguments.get("diffWith").and_then(|v| v.as_str());
 
     // Validate and preload reference diff image early to fail fast before capture
@@ -866,6 +887,7 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         highlight_cursor: highlight_cursor_flag,
         manual_masks,
         mask_windows: window_masks,
+        exclude_windows,
         allow_missing_mask: false,
         coords_mode: coords,
         scale,
@@ -880,6 +902,8 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         som: som_flag,
         som_threshold,
         som_max_elements,
+        accessibility: accessibility_flag,
+        a11y_nodes_override: None,
         clicks: parsed_clicks,
         drags: parsed_drags,
         global_cursor_override: None,

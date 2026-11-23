@@ -181,6 +181,15 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         }
     }
 
+    let mut exclude_windows = Vec::new();
+    if let Some(arr) = arguments.get("excludeWindows").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                exclude_windows.push(s.to_string());
+            }
+        }
+    }
+
     let interval = std::time::Duration::from_secs_f32(1.0 / fps as f32);
     let target_duration = std::time::Duration::from_secs_f32(duration_secs.clamp(0.1, 30.0));
     let start_time = std::time::Instant::now();
@@ -203,6 +212,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         highlight_cursor: highlight_cursor_flag,
         manual_masks,
         mask_windows: window_masks,
+        exclude_windows,
         allow_missing_mask: false,
         coords_mode: CoordMode::Logical,
         scale,

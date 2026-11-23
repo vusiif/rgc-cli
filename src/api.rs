@@ -147,7 +147,7 @@ impl CursorInfo {
 }
 
 /// Detected interactive UI element with bounding box and center click anchor across image and screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiElement {
     pub id: u32,
@@ -175,6 +175,18 @@ pub struct UiElement {
     /// Global OS desktop screen top-left Y coordinate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screen_y: Option<i32>,
+    /// Accessible role of the control (e.g., "button", "edit", "combobox", "window", "checkbox").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Human-readable label or text of the control (e.g., "Save", "Submit", "Search").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Whether the element is enabled for interaction according to accessibility tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Origin source: "vision" (SoM vision detection), "accessibility" (UIA/AX tree node), or "hybrid" (fused).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl UiElement {
@@ -193,6 +205,10 @@ impl UiElement {
             screen_center_y: None,
             screen_x: None,
             screen_y: None,
+            role: None,
+            label: None,
+            enabled: None,
+            source: Some("vision".to_string()),
         }
     }
 }

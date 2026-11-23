@@ -30,6 +30,9 @@ pub struct PrivacyConfig {
     /// Window title substrings to automatically mask (e.g. `["1Password", "Bitwarden"]`).
     #[serde(default)]
     pub mask_windows: Vec<String>,
+    /// Window title substrings to exclude and blackout completely (e.g. `["rgc-cli", "Terminal"]`).
+    #[serde(default)]
+    pub exclude_windows: Vec<String>,
     /// Coordinate regions to automatically mask (e.g. `["0,0,200,50:blackout"]`).
     #[serde(default)]
     pub mask_regions: Vec<String>,
@@ -62,6 +65,10 @@ pub struct DefaultsConfig {
     pub cursor: Option<bool>,
     #[serde(default)]
     pub coords: Option<String>,
+    #[serde(default)]
+    pub som: Option<bool>,
+    #[serde(default)]
+    pub accessibility: Option<bool>,
 }
 
 impl RgcConfig {

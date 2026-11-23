@@ -32,6 +32,7 @@ pub struct PipelineOptions {
     pub highlight_cursor: bool,
     pub manual_masks: Vec<MaskRegion>,
     pub mask_windows: Vec<MaskWindow>,
+    pub exclude_windows: Vec<String>,
     pub allow_missing_mask: bool,
     pub coords_mode: CoordMode,
     pub scale: Option<f64>,
@@ -46,6 +47,8 @@ pub struct PipelineOptions {
     pub som: bool,
     pub som_threshold: u8,
     pub som_max_elements: usize,
+    pub accessibility: bool,
+    pub a11y_nodes_override: Option<Vec<crate::accessibility::AccessibilityNode>>,
     pub clicks: Vec<ClickMarker>,
     pub drags: Vec<DragMarker>,
     /// Optional cursor position override (useful for deterministic tests).
@@ -72,6 +75,7 @@ pub struct RecordingFrameOptions {
     pub highlight_cursor: bool,
     pub manual_masks: Vec<MaskRegion>,
     pub mask_windows: Vec<MaskWindow>,
+    pub exclude_windows: Vec<String>,
     pub allow_missing_mask: bool,
     pub coords_mode: CoordMode,
     pub scale: Option<f64>,
@@ -118,9 +122,17 @@ pub fn execute_image_pipeline(
         }
     }
 
-    // Stage 2: Privacy redaction masks (blackout, transparent, pixelate, blur)
-    if !options.manual_masks.is_empty() || !options.mask_windows.is_empty() {
-        let windows = if !options.mask_windows.is_empty() {
+    // Stage 2: Privacy redaction masks (blackout, transparent, pixelate, blur, and excluded windows)
+    let mut combined_mask_windows = options.mask_windows.clone();
+    for query in &options.exclude_windows {
+        combined_mask_windows.push(MaskWindow {
+            query: query.clone(),
+            effect: crate::cli::MaskEffect::Blackout,
+        });
+    }
+
+    if !options.manual_masks.is_empty() || !combined_mask_windows.is_empty() {
+        let windows = if !combined_mask_windows.is_empty() {
             capture::get_windows().ok()
         } else {
             None
@@ -133,7 +145,7 @@ pub fn execute_image_pipeline(
             monitor_origin,
             options.coords_mode,
             &options.manual_masks,
-            &options.mask_windows,
+            &combined_mask_windows,
             windows.as_deref(),
             options.allow_missing_mask,
         )?;
@@ -221,7 +233,7 @@ pub fn execute_image_pipeline(
         (rgba.width(), rgba.height()),
     );
 
-    // Stage 8: Set-of-Mark (SoM) UI element detection & overlay
+    // Stage 8: Set-of-Mark (SoM) UI element detection, accessibility fusion & overlay
     let detected_elements = if options.som {
         let mut elements = som::detect_ui_elements_from_rgba(
             &rgba,
@@ -237,6 +249,28 @@ pub fn execute_image_pipeline(
             elem.screen_center_y = Some(screen_cy);
             elem.screen_x = Some(screen_tl_x);
             elem.screen_y = Some(screen_tl_y);
+        }
+
+        // Stage 8b: Spatial fusion with OS accessibility semantics
+        if options.accessibility {
+            let a11y_nodes = if let Some(ref override_nodes) = options.a11y_nodes_override {
+                override_nodes.clone()
+            } else {
+                let (screen_w, screen_h) = (
+                    (canvas_w as f64 * transform.screen_scale_factor as f64).round() as u32,
+                    (canvas_h as f64 * transform.screen_scale_factor as f64).round() as u32,
+                );
+                crate::accessibility::query_system_accessibility_nodes(Some((
+                    origin.0, origin.1, screen_w, screen_h,
+                )))
+            };
+
+            crate::accessibility::fuse_accessibility_and_vision(
+                &mut elements,
+                &a11y_nodes,
+                &transform,
+                true,
+            );
         }
 
         som::draw_som_overlay_in_place(&mut rgba, &elements);
@@ -324,9 +358,17 @@ pub fn process_recording_frame(
         }
     }
 
-    // 2. Privacy redaction masks
-    if !options.manual_masks.is_empty() || !options.mask_windows.is_empty() {
-        let windows = if !options.mask_windows.is_empty() {
+    // 2. Privacy redaction masks (blackout, transparent, pixelate, blur, and excluded windows)
+    let mut combined_mask_windows = options.mask_windows.clone();
+    for query in &options.exclude_windows {
+        combined_mask_windows.push(MaskWindow {
+            query: query.clone(),
+            effect: crate::cli::MaskEffect::Blackout,
+        });
+    }
+
+    if !options.manual_masks.is_empty() || !combined_mask_windows.is_empty() {
+        let windows = if !combined_mask_windows.is_empty() {
             capture::get_windows().ok()
         } else {
             None
@@ -339,7 +381,7 @@ pub fn process_recording_frame(
             monitor_origin,
             options.coords_mode,
             &options.manual_masks,
-            &options.mask_windows,
+            &combined_mask_windows,
             windows.as_deref(),
             options.allow_missing_mask,
         )?;
@@ -497,6 +539,30 @@ mod tests {
         // Diff bbox was padded by 8, so (80 - 8, 80 - 8) = (72, 72)
         assert_eq!(result.coordinates.diff_crop_offset, (72, 72));
         assert!(result.clicks.is_some());
+    }
+
+    #[test]
+    fn test_execute_image_pipeline_accessibility_fusion() {
+        let raw = DynamicImage::new_rgba8(400, 300);
+        let mut options = PipelineOptions::default();
+        options.som = true;
+        options.accessibility = true;
+        options.a11y_nodes_override = Some(vec![
+            crate::accessibility::AccessibilityNode::new(
+                50, 50, 100, 40, "Button", Some("OK".to_string()), true
+            )
+        ]);
+
+        let result = execute_image_pipeline(raw, 1.0, (0, 0), Some((0, 0)), &options)
+            .expect("Accessibility pipeline should succeed");
+
+        assert!(result.elements.is_some());
+        let elems = result.elements.unwrap();
+        // Since the canvas is blank, vision finds nothing, but a11y injects the interactive Button!
+        assert!(!elems.is_empty());
+        let injected = elems.iter().find(|e| e.role.as_deref() == Some("Button")).unwrap();
+        assert_eq!(injected.label.as_deref(), Some("OK"));
+        assert_eq!(injected.source.as_deref(), Some("accessibility"));
     }
 
     #[test]

@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
+pub mod accessibility;
 pub mod action;
 pub mod api;
+pub mod benchmark;
 pub mod capture;
 pub mod cli;
 pub mod config;
@@ -137,6 +139,13 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
     if args.mcp {
         mcp::run_mcp_server()
             .map_err(|e| ApiError::new(ErrorCode::IoError, format!("MCP server error: {e}")))?;
+        return Ok(());
+    }
+
+    // 0.5. Handle benchmark diagnostic mode
+    if let Some(runs) = args.benchmark {
+        benchmark::run_benchmark(runs, args.json)
+            .map_err(|e| ApiError::new(ErrorCode::CaptureFailed, e))?;
         return Ok(());
     }
 
@@ -490,6 +499,7 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
         highlight_cursor: args.highlight_cursor,
         manual_masks: args.mask.clone(),
         mask_windows: args.mask_window.clone(),
+        exclude_windows: args.exclude_window.clone(),
         allow_missing_mask: args.allow_missing_mask,
         coords_mode: args.coords,
         scale: args.scale,
@@ -504,6 +514,8 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
         som: args.som,
         som_threshold: args.som_threshold,
         som_max_elements: args.som_max_elements,
+        accessibility: args.accessibility,
+        a11y_nodes_override: None,
         clicks,
         drags,
         global_cursor_override: None,
@@ -689,6 +701,7 @@ fn run_recording(
         highlight_cursor: args.highlight_cursor,
         manual_masks: args.mask.clone(),
         mask_windows: args.mask_window.clone(),
+        exclude_windows: args.exclude_window.clone(),
         allow_missing_mask: args.allow_missing_mask,
         coords_mode: args.coords,
         scale: args.scale,
@@ -806,6 +819,24 @@ fn apply_config_to_cli(args: &mut Cli, cfg: &config::RgcConfig) {
             if let Ok(mw) = w.parse::<cli::MaskWindow>() {
                 args.mask_window.push(mw);
             }
+        }
+    }
+
+    if args.exclude_window.is_empty() {
+        for w in &cfg.privacy.exclude_windows {
+            args.exclude_window.push(w.clone());
+        }
+    }
+
+    if !args.accessibility {
+        if let Some(a) = cfg.defaults.accessibility {
+            args.accessibility = a;
+        }
+    }
+
+    if !args.som {
+        if let Some(s) = cfg.defaults.som {
+            args.som = s;
         }
     }
 

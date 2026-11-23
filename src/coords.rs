@@ -73,6 +73,11 @@ impl CoordinateTransform {
         }
     }
 
+    /// Construct an identity coordinate transform for a canvas/output of given dimensions.
+    pub fn identity(size: (u32, u32)) -> Self {
+        Self::new((0, 0), 1.0, (0, 0), 1.0, (0, 0), size, size)
+    }
+
     /// Map from OS screen desktop coordinates to unscaled canvas pixels.
     pub fn screen_to_canvas(&self, screen_x: i32, screen_y: i32) -> (i32, i32) {
         let rel_x = screen_x.saturating_sub(self.screen_origin.0);

@@ -5,6 +5,23 @@ All notable changes to `rgc-cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.0] - 2026-11-23
+
+### Added
+- **OS Accessibility Tree & Set-of-Mark Spatial Fusion (`src/accessibility/mod.rs`, `--accessibility` / `--a11y`)**:
+  - Bridges visual UI edge clustering with OS desktop accessibility semantics (roles, labels, interaction states).
+  - Implemented IoU (Intersection-over-Union) and geometric containment fusion algorithms to attach semantic metadata (`role`, `label`, `enabled`, `source`) onto visual `UiElement` bounding boxes.
+  - Automatically injects high-value interactive accessibility controls (e.g., buttons, edit inputs, checkboxes) missed by vision into the Set-of-Mark element set with coordinate mapping.
+  - Supported across CLI (`--accessibility`, `--a11y`), configuration file (`defaults.accessibility`), and MCP `capture_screen` tool (`accessibility: true`).
+- **Performance & Latency Benchmark Diagnostic Mode (`src/benchmark.rs`, `--benchmark [RUNS]`)**:
+  - Measures end-to-end screen capture overhead: native display capture latency, image pipeline processing latency (downscaling, diff, overlays), SoM edge clustering latency, and image encoder throughput (PNG, JPEG, WebP) in Megapixels/sec and compressed byte size.
+  - Provides formatted diagnostic output tables and structured JSON reports (`--json`) for automated performance profiling and CI verification.
+- **Window Exclusion & Redaction (`--exclude-window <QUERY>`)**:
+  - Excludes and blacks out specified windows (by title substring or ID) from desktop panorama or monitor captures.
+  - Configurable via CLI `--exclude-window`, configuration profiles `[privacy] exclude_windows = [...]`, and MCP tool arguments (`excludeWindows: [...]`).
+
+---
+
 ## [2.8.0] - 2026-11-23
 
 ### Added

@@ -165,6 +165,12 @@ impl ImageFormat {
     }
 }
 
+impl std::fmt::Display for ImageFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.extension())
+    }
+}
+
 /// Parses and validates a downscaling factor between 0.01 and 1.0.
 pub fn parse_scale_factor(s: &str) -> Result<f64, String> {
     let factor: f64 = s
@@ -216,13 +222,13 @@ pub struct Cli {
     #[arg(
         long = "doctor",
         conflicts_with_all = [
-            "mcp", "list_monitors", "list_windows", "completions", "monitor", "window", "all_monitors", "region", "output",
+            "mcp", "list_monitors", "list_windows", "completions", "benchmark", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
-            "scale", "max_dimension", "quality", "open", "mask", "mask_window",
+            "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
             "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
             "cursor", "highlight_cursor", "record", "fps",
-            "som", "som_threshold", "som_max_elements",
+            "som", "som_threshold", "som_max_elements", "accessibility",
             "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
         ]
     )]
@@ -232,13 +238,13 @@ pub struct Cli {
     #[arg(
         long = "mcp",
         conflicts_with_all = [
-            "doctor", "list_monitors", "list_windows", "completions", "monitor", "window", "all_monitors", "region", "output",
+            "doctor", "list_monitors", "list_windows", "completions", "benchmark", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "format",
-            "coords", "json", "scale", "max_dimension", "quality", "open", "mask", "mask_window",
+            "coords", "json", "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
             "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
             "cursor", "highlight_cursor", "record", "fps",
-            "som", "som_threshold", "som_max_elements",
+            "som", "som_threshold", "som_max_elements", "accessibility",
             "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
         ]
     )]
@@ -249,9 +255,9 @@ pub struct Cli {
         short = 'l',
         long = "list-monitors",
         conflicts_with_all = [
-            "doctor", "mcp", "list_windows", "completions", "monitor", "window", "all_monitors", "region", "output",
+            "doctor", "mcp", "list_windows", "completions", "benchmark", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
-            "scale", "max_dimension", "quality", "open", "mask", "mask_window",
+            "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
             "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
             "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
@@ -263,9 +269,9 @@ pub struct Cli {
     #[arg(
         long = "list-windows",
         conflicts_with_all = [
-            "doctor", "mcp", "list_monitors", "completions", "monitor", "window", "all_monitors", "region", "output",
+            "doctor", "mcp", "list_monitors", "completions", "benchmark", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
-            "scale", "max_dimension", "quality", "open", "mask", "mask_window",
+            "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
             "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
             "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
@@ -279,9 +285,9 @@ pub struct Cli {
         value_name = "SHELL",
         value_enum,
         conflicts_with_all = [
-            "doctor", "mcp", "list_monitors", "list_windows", "monitor", "window", "all_monitors", "region", "output",
+            "doctor", "mcp", "list_monitors", "list_windows", "benchmark", "monitor", "window", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
-            "scale", "max_dimension", "quality", "format", "json", "open", "mask", "mask_window",
+            "scale", "max_dimension", "quality", "format", "json", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
             "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
             "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
@@ -339,6 +345,15 @@ pub struct Cli {
         action = clap::ArgAction::Append
     )]
     pub mask_window: Vec<MaskWindow>,
+
+    /// Exclude active window(s) completely from captured screen by title substring or ID
+    #[arg(
+        long = "exclude-window",
+        value_name = "ID|TITLE",
+        conflicts_with = "window",
+        action = clap::ArgAction::Append
+    )]
+    pub exclude_window: Vec<String>,
 
     /// Allow export to proceed if specified --mask-window target is not found on desktop (default: fail-closed to protect privacy)
     #[arg(long = "allow-missing-mask")]
@@ -495,6 +510,10 @@ pub struct Cli {
     #[arg(long = "som-max-elements", value_name = "COUNT", default_value_t = 50)]
     pub som_max_elements: usize,
 
+    /// Fuse UI automation accessibility tree semantics (role, label, state) with Set-of-Mark detections
+    #[arg(long = "accessibility", visible_alias = "a11y")]
+    pub accessibility: bool,
+
     /// Overlay a visual click ripple and target indicator at coordinate X,Y (e.g. 500,300 or 500,300,submit)
     #[arg(long = "click-at", value_name = "X,Y[,LABEL]", action = clap::ArgAction::Append)]
     pub click_at: Vec<String>,
@@ -549,6 +568,18 @@ pub struct Cli {
     /// Timeout in seconds before automatically terminating --watch mode
     #[arg(long = "watch-timeout", value_name = "SECS")]
     pub watch_timeout: Option<f32>,
+
+    /// Run comprehensive performance and latency benchmarks (capture, processing, encoders)
+    #[arg(
+        long = "benchmark",
+        value_name = "RUNS",
+        num_args = 0..=1,
+        default_missing_value = "5",
+        conflicts_with_all = [
+            "record", "completions", "doctor", "mcp", "list_monitors", "list_windows", "watch"
+        ]
+    )]
+    pub benchmark: Option<u32>,
 
     /// Open captured screenshot file with system default viewer
     #[arg(
@@ -892,6 +923,35 @@ mod tests {
 
         // Conflict: --mask and --doctor
         assert!(Cli::try_parse_from(["rgc-cli", "--doctor", "--mask", "0,0,10,10"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parsing_v290_options() {
+        let cli = Cli::try_parse_from([
+            "rgc-cli",
+            "--exclude-window",
+            "Terminal",
+            "--exclude-window",
+            "rgc-cli",
+            "--a11y",
+            "--som",
+            "--benchmark",
+            "10",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.exclude_window, vec!["Terminal", "rgc-cli"]);
+        assert!(cli.accessibility);
+        assert!(cli.som);
+        assert_eq!(cli.benchmark, Some(10));
+
+        let cli_default_bench = Cli::try_parse_from(["rgc-cli", "--benchmark"]).unwrap();
+        assert_eq!(cli_default_bench.benchmark, Some(5));
+
+        // Conflict: --benchmark and --record
+        assert!(Cli::try_parse_from(["rgc-cli", "--benchmark", "--record", "2"]).is_err());
+        // Conflict: --exclude-window and --window
+        assert!(Cli::try_parse_from(["rgc-cli", "-w", "Code", "--exclude-window", "Terminal"]).is_err());
     }
 
     #[test]
