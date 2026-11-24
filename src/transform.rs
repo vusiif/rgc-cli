@@ -455,7 +455,8 @@ pub fn calculate_image_diff(
                 continue;
             }
 
-            for (x_usize, (cp, rp)) in c_row.chunks_exact(4).zip(r_row.chunks_exact(4)).enumerate() {
+            for (x_usize, (cp, rp)) in c_row.chunks_exact(4).zip(r_row.chunks_exact(4)).enumerate()
+            {
                 let is_diff = cp[0].abs_diff(rp[0]) > threshold
                     || cp[1].abs_diff(rp[1]) > threshold
                     || cp[2].abs_diff(rp[2]) > threshold

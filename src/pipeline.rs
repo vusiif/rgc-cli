@@ -177,7 +177,10 @@ pub fn execute_image_pipeline(
         if options.crop_changed {
             if let Some(ref bbox) = diff.bbox {
                 let padding = 8u32;
-                diff_crop_offset = (bbox.x.saturating_sub(padding), bbox.y.saturating_sub(padding));
+                diff_crop_offset = (
+                    bbox.x.saturating_sub(padding),
+                    bbox.y.saturating_sub(padding),
+                );
                 current_img = output::crop_to_diff_bbox(current_img, bbox, padding);
             }
         }
@@ -569,11 +572,15 @@ mod tests {
         let mut options = PipelineOptions::default();
         options.som = true;
         options.accessibility = true;
-        options.a11y_nodes_override = Some(vec![
-            crate::accessibility::AccessibilityNode::new(
-                50, 50, 100, 40, "Button", Some("OK".to_string()), true
-            )
-        ]);
+        options.a11y_nodes_override = Some(vec![crate::accessibility::AccessibilityNode::new(
+            50,
+            50,
+            100,
+            40,
+            "Button",
+            Some("OK".to_string()),
+            true,
+        )]);
 
         let result = execute_image_pipeline(raw, 1.0, (0, 0), Some((0, 0)), &options)
             .expect("Accessibility pipeline should succeed");
@@ -582,7 +589,10 @@ mod tests {
         let elems = result.elements.unwrap();
         // Since the canvas is blank, vision finds nothing, but a11y injects the interactive Button!
         assert!(!elems.is_empty());
-        let injected = elems.iter().find(|e| e.role.as_deref() == Some("Button")).unwrap();
+        let injected = elems
+            .iter()
+            .find(|e| e.role.as_deref() == Some("Button"))
+            .unwrap();
         assert_eq!(injected.label.as_deref(), Some("OK"));
         assert_eq!(injected.source.as_deref(), Some("accessibility"));
     }
@@ -604,8 +614,14 @@ mod tests {
             highlight: true,
         });
 
-        let result = execute_image_pipeline(DynamicImage::ImageRgba8(raw_rgba), 1.0, (0, 0), Some((100, 200)), &options)
-            .expect("Template match pipeline should succeed");
+        let result = execute_image_pipeline(
+            DynamicImage::ImageRgba8(raw_rgba),
+            1.0,
+            (0, 0),
+            Some((100, 200)),
+            &options,
+        )
+        .expect("Template match pipeline should succeed");
 
         assert!(result.matches.is_some());
         let matches = result.matches.unwrap();

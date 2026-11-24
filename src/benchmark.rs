@@ -86,20 +86,21 @@ pub fn run_benchmark(runs: u32, is_json: bool) -> Result<(), String> {
     let runs = runs.clamp(1, 100);
 
     // 1. Warm-up capture or fallback to synthetic 1920x1080 canvas if running headless
-    let (sample_img, is_synthetic) = match capture::capture_screen_with_details(None, None, crate::cli::CoordMode::Physical) {
-        Ok(c) => (c.image, false),
-        Err(_) => {
-            let mut img = DynamicImage::new_rgba8(1920, 1080);
-            let rgba = img.as_mut_rgba8().unwrap();
-            for (x, y, pixel) in rgba.enumerate_pixels_mut() {
-                let r = ((x * 255) / 1920) as u8;
-                let g = ((y * 255) / 1080) as u8;
-                let b = ((x + y) % 256) as u8;
-                *pixel = image::Rgba([r, g, b, 255]);
+    let (sample_img, is_synthetic) =
+        match capture::capture_screen_with_details(None, None, crate::cli::CoordMode::Physical) {
+            Ok(c) => (c.image, false),
+            Err(_) => {
+                let mut img = DynamicImage::new_rgba8(1920, 1080);
+                let rgba = img.as_mut_rgba8().unwrap();
+                for (x, y, pixel) in rgba.enumerate_pixels_mut() {
+                    let r = ((x * 255) / 1920) as u8;
+                    let g = ((y * 255) / 1080) as u8;
+                    let b = ((x + y) % 256) as u8;
+                    *pixel = image::Rgba([r, g, b, 255]);
+                }
+                (img, true)
             }
-            (img, true)
-        }
-    };
+        };
 
     let width = sample_img.width();
     let height = sample_img.height();
@@ -111,7 +112,8 @@ pub fn run_benchmark(runs: u32, is_json: bool) -> Result<(), String> {
     if !is_synthetic {
         for _ in 0..runs {
             let t0 = Instant::now();
-            let _ = capture::capture_screen_with_details(None, None, crate::cli::CoordMode::Physical);
+            let _ =
+                capture::capture_screen_with_details(None, None, crate::cli::CoordMode::Physical);
             let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
             capture_samples.push(elapsed_ms);
         }
@@ -215,7 +217,11 @@ fn print_human_benchmark_report(report: &BenchmarkReport, is_synthetic: bool) {
         report.image_width,
         report.image_height,
         (report.image_width as f64 * report.image_height as f64) / 1_000_000.0,
-        if is_synthetic { "Synthetic Fallback" } else { "Physical Screen" }
+        if is_synthetic {
+            "Synthetic Fallback"
+        } else {
+            "Physical Screen"
+        }
     );
     println!("Test Iterations: {}", report.runs);
     println!("------------------------------------------------------------");

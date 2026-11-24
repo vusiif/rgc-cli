@@ -14,7 +14,7 @@ pub fn get_record_tool_definition() -> ToolDefinition {
             "properties": {
                 "durationSecs": {
                     "type": "number",
-                    "description": "Duration in seconds to record (e.g. 1.0 to 30.0)."
+                    "description": "Duration in seconds to record (0.1 to 30.0 seconds)."
                 },
                 "fps": {
                     "type": "integer",
@@ -53,6 +53,10 @@ pub fn get_record_tool_definition() -> ToolDefinition {
                     "type": "string",
                     "description": "Optional output path for animated GIF or WebP file."
                 },
+                "allowOverwrite": {
+                    "type": "boolean",
+                    "description": "Optional flag to permit overwriting an existing output file at outputPath."
+                },
                 "returnBase64": {
                     "type": "boolean",
                     "description": "Whether to return the animated GIF or WebP base64 data in the response. Defaults to true if outputPath is omitted."
@@ -74,6 +78,15 @@ pub fn get_record_tool_definition() -> ToolDefinition {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Optional window titles or IDs to redact from recorded frames."
+                },
+                "excludeWindows": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional list of window titles or patterns to exclude and blackout completely from recorded frames."
+                },
+                "allowMissingMask": {
+                    "type": "boolean",
+                    "description": "Optional flag to permit recording if a configured mask window is not found."
                 }
             },
             "required": ["durationSecs"],
@@ -85,11 +98,11 @@ pub fn get_record_tool_definition() -> ToolDefinition {
 /// Execute the `record_screen` MCP tool, sampling consecutive frames and encoding them as an animated GIF.
 pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let duration_secs = match arguments.get("durationSecs").and_then(|v| v.as_f64()) {
-        Some(d) if d.is_finite() && d > 0.0 && d <= 3600.0 => d as f32,
+        Some(d) if d.is_finite() && (0.1..=30.0).contains(&d) => d as f32,
         _ => {
             return ToolCallResult {
                 content: vec![ToolContent::Text {
-                    text: "Missing or invalid 'durationSecs' parameter: must be a finite positive number <= 3600.0"
+                    text: "Missing or invalid 'durationSecs' parameter: must be a finite number between 0.1 and 30.0 seconds."
                         .to_string(),
                 }],
                 is_error: true,
@@ -218,8 +231,18 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         }
     }
 
+    let request_allow_missing = arguments.get("allowMissingMask").and_then(|v| v.as_bool());
+    let cfg = crate::config::get_active_config();
+    let privacy_policy = crate::config::PrivacyPolicy::from_config_and_request(
+        &cfg.privacy,
+        &window_masks,
+        &exclude_windows,
+        &manual_masks,
+        request_allow_missing,
+    );
+
     let interval = std::time::Duration::from_secs_f32(1.0 / fps as f32);
-    let target_duration = std::time::Duration::from_secs_f32(duration_secs.clamp(0.1, 30.0));
+    let target_duration = std::time::Duration::from_secs_f32(duration_secs);
     let start_time = std::time::Instant::now();
 
     let mut anim_buffer = std::io::Cursor::new(Vec::new());
@@ -252,10 +275,10 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let frame_options = crate::pipeline::RecordingFrameOptions {
         cursor: cursor_flag,
         highlight_cursor: highlight_cursor_flag,
-        manual_masks,
-        mask_windows: window_masks,
-        exclude_windows,
-        allow_missing_mask: false,
+        manual_masks: privacy_policy.mask_regions,
+        mask_windows: privacy_policy.mask_windows,
+        exclude_windows: privacy_policy.exclude_windows,
+        allow_missing_mask: privacy_policy.allow_missing_mask,
         coords_mode: CoordMode::Logical,
         scale,
         max_dimension,
@@ -402,7 +425,11 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .as_ref()
         .map(|p| format!(" saved to '{}'", p.display()))
         .unwrap_or_default();
-    let format_label = if is_webp { "animated WebP" } else { "animated GIF" };
+    let format_label = if is_webp {
+        "animated WebP"
+    } else {
+        "animated GIF"
+    };
     content.push(ToolContent::Text {
         text: format!(
             "Recorded {} frames ({}x{}) at {} FPS over {:.2}s ({} bytes, format: {}){save_msg}",

@@ -71,6 +71,78 @@ pub struct DefaultsConfig {
     pub accessibility: Option<bool>,
 }
 
+/// Unified privacy policy resolved from configuration and request-specific options.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PrivacyPolicy {
+    pub mask_windows: Vec<crate::cli::MaskWindow>,
+    pub exclude_windows: Vec<String>,
+    pub mask_regions: Vec<crate::cli::MaskRegion>,
+    pub allow_missing_mask: bool,
+}
+
+impl PrivacyPolicy {
+    /// Merge global configuration with request-level options.
+    ///
+    /// Rules:
+    /// - Configured `mask_windows` are parsed and retained; request-level masks are appended (union).
+    /// - Configured `exclude_windows` are retained; request-level excludes are appended (union without duplicates).
+    /// - Configured `mask_regions` are parsed and retained; request-level regions are appended.
+    /// - `allow_missing_mask`: request-level override takes effect if Some; otherwise defaults to configured value, or false.
+    pub fn from_config_and_request(
+        cfg: &PrivacyConfig,
+        request_mask_windows: &[crate::cli::MaskWindow],
+        request_exclude_windows: &[String],
+        request_mask_regions: &[crate::cli::MaskRegion],
+        request_allow_missing: Option<bool>,
+    ) -> Self {
+        let mut mask_windows = Vec::new();
+        for w in &cfg.mask_windows {
+            if let Ok(mw) = w.parse::<crate::cli::MaskWindow>() {
+                mask_windows.push(mw);
+            }
+        }
+        for rm in request_mask_windows {
+            if !mask_windows
+                .iter()
+                .any(|m| m.query == rm.query && m.effect == rm.effect)
+            {
+                mask_windows.push(rm.clone());
+            }
+        }
+
+        let mut exclude_windows = cfg.exclude_windows.clone();
+        for ew in request_exclude_windows {
+            if !exclude_windows.iter().any(|e| e == ew) {
+                exclude_windows.push(ew.clone());
+            }
+        }
+
+        let mut mask_regions = Vec::new();
+        for r in &cfg.mask_regions {
+            if let Ok(mr) = r.parse::<crate::cli::MaskRegion>() {
+                mask_regions.push(mr);
+            }
+        }
+        mask_regions.extend_from_slice(request_mask_regions);
+
+        let allow_missing_mask = request_allow_missing
+            .or(cfg.allow_missing_mask)
+            .unwrap_or(false);
+
+        Self {
+            mask_windows,
+            exclude_windows,
+            mask_regions,
+            allow_missing_mask,
+        }
+    }
+}
+
+/// Retrieve the active global configuration or default.
+pub fn get_active_config() -> RgcConfig {
+    RgcConfig::load(None).unwrap_or_default()
+}
+
 impl RgcConfig {
     /// Parse configuration from a TOML string.
     pub fn from_toml(content: &str) -> Result<Self, toml::de::Error> {
@@ -84,7 +156,10 @@ impl RgcConfig {
                 match fs::read_to_string(path) {
                     Ok(content) => match Self::from_toml(&content) {
                         Ok(cfg) => {
-                            debug!("Loaded configuration from explicit path: {}", path.display());
+                            debug!(
+                                "Loaded configuration from explicit path: {}",
+                                path.display()
+                            );
                             return Some(cfg);
                         }
                         Err(e) => {
@@ -200,5 +275,67 @@ coords = "physical"
         assert_eq!(config, RgcConfig::default());
         assert!(config.privacy.mask_windows.is_empty());
         assert!(config.security.allowed_output_dirs.is_empty());
+    }
+
+    #[test]
+    fn test_privacy_policy_merging_and_inheritance() {
+        let cfg = PrivacyConfig {
+            mask_windows: vec!["1Password:blackout".to_string(), "Bitwarden".to_string()],
+            exclude_windows: vec!["Terminal".to_string()],
+            mask_regions: vec!["0,0,100,50:blur".to_string()],
+            allow_missing_mask: Some(false),
+        };
+
+        let req_mask_win = vec![crate::cli::MaskWindow {
+            query: "Slack".to_string(),
+            effect: crate::cli::MaskEffect::Transparent,
+        }];
+        let req_exclude = vec!["rgc-cli".to_string(), "Terminal".to_string()];
+        let req_region = vec![crate::cli::MaskRegion {
+            region: crate::cli::Region {
+                x: 10,
+                y: 10,
+                width: 50,
+                height: 50,
+            },
+            effect: crate::cli::MaskEffect::Blackout,
+        }];
+
+        let policy = PrivacyPolicy::from_config_and_request(
+            &cfg,
+            &req_mask_win,
+            &req_exclude,
+            &req_region,
+            None,
+        );
+
+        // Mask windows: 1Password, Bitwarden, Slack (union)
+        assert_eq!(policy.mask_windows.len(), 3);
+        assert_eq!(policy.mask_windows[0].query, "1Password");
+        assert_eq!(
+            policy.mask_windows[0].effect,
+            crate::cli::MaskEffect::Blackout
+        );
+        assert_eq!(policy.mask_windows[1].query, "Bitwarden");
+        assert_eq!(policy.mask_windows[2].query, "Slack");
+
+        // Exclude windows: Terminal, rgc-cli (deduplicated union)
+        assert_eq!(policy.exclude_windows, vec!["Terminal", "rgc-cli"]);
+
+        // Mask regions: configured + request
+        assert_eq!(policy.mask_regions.len(), 2);
+        assert_eq!(policy.mask_regions[0].effect, crate::cli::MaskEffect::Blur);
+        assert_eq!(
+            policy.mask_regions[1].effect,
+            crate::cli::MaskEffect::Blackout
+        );
+
+        // Inherited allow_missing_mask
+        assert!(!policy.allow_missing_mask);
+
+        // Request override of allow_missing_mask
+        let policy_override =
+            PrivacyPolicy::from_config_and_request(&cfg, &[], &[], &[], Some(true));
+        assert!(policy_override.allow_missing_mask);
     }
 }

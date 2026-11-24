@@ -146,7 +146,11 @@ pub fn execute_verify_action_tool(arguments: &serde_json::Value) -> ToolCallResu
         .unwrap_or(false);
 
     let output_path = match arguments.get("outputPath").and_then(|v| v.as_str()) {
-        Some(s) => match crate::mcp::tools::validate_mcp_output_path(s, &["png", "jpg", "jpeg", "webp"], allow_overwrite) {
+        Some(s) => match crate::mcp::tools::validate_mcp_output_path(
+            s,
+            &["png", "jpg", "jpeg", "webp"],
+            allow_overwrite,
+        ) {
             Ok(pb) => Some(pb),
             Err(e) => {
                 return ToolCallResult {
@@ -221,7 +225,10 @@ pub fn execute_verify_action_tool(arguments: &serde_json::Value) -> ToolCallResu
         if let Err(e) = output::save_image(&annotated_img, &dest, ImageFormat::Png, None) {
             return ToolCallResult {
                 content: vec![ToolContent::Text {
-                    text: format!("Failed to save annotated screenshot to '{}': {e}", out_p.display()),
+                    text: format!(
+                        "Failed to save annotated screenshot to '{}': {e}",
+                        out_p.display()
+                    ),
                 }],
                 is_error: true,
             };

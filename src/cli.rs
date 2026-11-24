@@ -192,10 +192,9 @@ pub fn parse_scale_factor(s: &str) -> Result<f64, String> {
 
 /// Parses and validates a recording duration in seconds (must be finite positive <= 3600s).
 pub fn parse_record_duration(s: &str) -> Result<f32, String> {
-    let secs: f32 = s
-        .trim()
-        .parse()
-        .map_err(|_| format!("Invalid record duration '{s}': expected a positive number of seconds"))?;
+    let secs: f32 = s.trim().parse().map_err(|_| {
+        format!("Invalid record duration '{s}': expected a positive number of seconds")
+    })?;
     if !secs.is_finite() || secs <= 0.0 {
         return Err(format!(
             "Recording duration must be a finite positive number of seconds (got '{s}')"
@@ -523,11 +522,19 @@ pub struct Cli {
     pub find_template: Option<std::path::PathBuf>,
 
     /// Minimum confidence threshold for template matching (0.0-1.0, default: 0.85)
-    #[arg(long = "template-threshold", value_name = "0.0-1.0", default_value_t = 0.85)]
+    #[arg(
+        long = "template-threshold",
+        value_name = "0.0-1.0",
+        default_value_t = 0.85
+    )]
     pub template_threshold: f32,
 
     /// Maximum number of matching template occurrences to locate (default: 1)
-    #[arg(long = "template-max-matches", value_name = "COUNT", default_value_t = 1)]
+    #[arg(
+        long = "template-max-matches",
+        value_name = "COUNT",
+        default_value_t = 1
+    )]
     pub template_max_matches: usize,
 
     /// Overlay visual bounding box and confidence score badges onto matched template locations
@@ -578,7 +585,11 @@ pub struct Cli {
     pub watch_threshold: u8,
 
     /// Minimum percent of changed pixels (0.01 - 100.0) required to trigger a --watch event (default: 0.05%)
-    #[arg(long = "watch-min-percent", value_name = "PERCENT", default_value_t = 0.05)]
+    #[arg(
+        long = "watch-min-percent",
+        value_name = "PERCENT",
+        default_value_t = 0.05
+    )]
     pub watch_min_percent: f64,
 
     /// Maximum number of change events to trigger before terminating --watch mode (default: infinite)
@@ -971,7 +982,9 @@ mod tests {
         // Conflict: --benchmark and --record
         assert!(Cli::try_parse_from(["rgc-cli", "--benchmark", "--record", "2"]).is_err());
         // Conflict: --exclude-window and --window
-        assert!(Cli::try_parse_from(["rgc-cli", "-w", "Code", "--exclude-window", "Terminal"]).is_err());
+        assert!(
+            Cli::try_parse_from(["rgc-cli", "-w", "Code", "--exclude-window", "Terminal"]).is_err()
+        );
     }
 
     #[test]
@@ -988,7 +1001,10 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(cli.find_template, Some(std::path::PathBuf::from("icon.png")));
+        assert_eq!(
+            cli.find_template,
+            Some(std::path::PathBuf::from("icon.png"))
+        );
         assert!((cli.template_threshold - 0.92).abs() < 1e-4);
         assert_eq!(cli.template_max_matches, 3);
         assert!(cli.highlight_template);
@@ -1169,7 +1185,9 @@ mod tests {
         assert!(parse_record_duration("3601").is_err());
 
         // CLI conflict with diff-with
-        assert!(Cli::try_parse_from(["rgc-cli", "--record", "5", "--diff-with", "ref.png"]).is_err());
+        assert!(
+            Cli::try_parse_from(["rgc-cli", "--record", "5", "--diff-with", "ref.png"]).is_err()
+        );
     }
 
     #[test]
@@ -1198,7 +1216,10 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(cli_watch.config, Some(std::path::PathBuf::from("custom_rgc.toml")));
+        assert_eq!(
+            cli_watch.config,
+            Some(std::path::PathBuf::from("custom_rgc.toml"))
+        );
         assert_eq!(cli_watch.watch, Some(200));
         assert_eq!(cli_watch.watch_threshold, 25);
         assert_eq!(cli_watch.watch_min_percent, 0.1);
@@ -1220,6 +1241,8 @@ mod tests {
         // Fails if --client-only is passed without -w / --window
         assert!(Cli::try_parse_from(["rgc-cli", "--client-only"]).is_err());
         // Fails if --client-only is passed with --doctor
-        assert!(Cli::try_parse_from(["rgc-cli", "-w", "Code", "--client-only", "--doctor"]).is_err());
+        assert!(
+            Cli::try_parse_from(["rgc-cli", "-w", "Code", "--client-only", "--doctor"]).is_err()
+        );
     }
 }

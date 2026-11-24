@@ -181,6 +181,30 @@ pub fn get_session_tool_definition() -> ToolDefinition {
                 "allowOverwrite": {
                     "type": "boolean",
                     "description": "Allow overwriting existing file at outputPath."
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["png", "webp", "jpeg", "jpg"],
+                    "description": "Image format ('png', 'webp', or 'jpeg'). Inferred from outputPath if omitted, defaulting to 'png'."
+                },
+                "redactions": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional privacy redaction regions: 'x,y,w,h[:effect]'."
+                },
+                "maskWindows": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional window titles or IDs to redact from frames."
+                },
+                "excludeWindows": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional list of window titles to blackout completely."
+                },
+                "allowMissingMask": {
+                    "type": "boolean",
+                    "description": "Optional flag to permit capture if a configured mask window is not found."
                 }
             },
             "additionalProperties": false
@@ -267,23 +291,73 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    let explicit_format = match arguments.get("format").and_then(|v| v.as_str()) {
+        Some("webp") => Some(crate::cli::ImageFormat::Webp),
+        Some("jpeg") | Some("jpg") => Some(crate::cli::ImageFormat::Jpeg),
+        Some("png") => Some(crate::cli::ImageFormat::Png),
+        _ => None,
+    };
+
+    let mut manual_masks = Vec::new();
+    if let Some(arr) = arguments.get("redactions").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                if let Ok(mr) = s.parse::<crate::cli::MaskRegion>() {
+                    manual_masks.push(mr);
+                }
+            }
+        }
+    }
+
+    let mut window_masks = Vec::new();
+    if let Some(arr) = arguments.get("maskWindows").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                if let Ok(mw) = s.parse::<crate::cli::MaskWindow>() {
+                    window_masks.push(mw);
+                }
+            }
+        }
+    }
+
+    let mut exclude_windows = Vec::new();
+    if let Some(arr) = arguments.get("excludeWindows").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                exclude_windows.push(s.to_string());
+            }
+        }
+    }
+
+    let request_allow_missing = arguments.get("allowMissingMask").and_then(|v| v.as_bool());
+    let cfg = crate::config::get_active_config();
+    let privacy_policy = crate::config::PrivacyPolicy::from_config_and_request(
+        &cfg.privacy,
+        &window_masks,
+        &exclude_windows,
+        &manual_masks,
+        request_allow_missing,
+    );
+
     let allow_overwrite = arguments
         .get("allowOverwrite")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
     let output_path = match arguments.get("outputPath").and_then(|v| v.as_str()) {
-        Some(s) => match validate_mcp_output_path(s, &["png", "webp", "jpeg", "jpg"], allow_overwrite) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Invalid outputPath: {e}"),
-                    }],
-                    is_error: true,
-                };
+        Some(s) => {
+            match validate_mcp_output_path(s, &["png", "webp", "jpeg", "jpg"], allow_overwrite) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!("Invalid outputPath: {e}"),
+                        }],
+                        is_error: true,
+                    };
+                }
             }
-        },
+        }
         None => None,
     };
 
@@ -320,13 +394,17 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         }
     };
 
-    // Step 2: Execute base image pipeline (scale, cursor)
+    // Step 2: Execute base image pipeline (scale, cursor, privacy masks)
     let pipeline_opts = PipelineOptions {
         cursor: cursor_flag,
         highlight_cursor: highlight_cursor_flag,
         scale,
         max_dimension,
         som: som_flag,
+        manual_masks: privacy_policy.mask_regions,
+        mask_windows: privacy_policy.mask_windows,
+        exclude_windows: privacy_policy.exclude_windows,
+        allow_missing_mask: privacy_policy.allow_missing_mask,
         ..Default::default()
     };
 
@@ -357,53 +435,95 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
 
     let prior_session = manager.get(&session_id);
 
-    let (is_first_frame, frame_index, changed, changed_pixels, changed_percent, bbox, output_img) =
-        match prior_session {
-            None => {
-                // First frame of session: establish baseline
-                manager.update(session_id.clone(), current_img.clone(), 1);
-                (true, 1u64, false, 0u64, 0.0f64, None, current_img)
-            }
-            Some(record) => {
-                let diff = output::calculate_image_diff(&current_img, &record.last_image, threshold);
-                let next_frame_idx = record.frame_index + 1;
+    let (
+        is_first_frame,
+        frame_index,
+        changed,
+        changed_pixels,
+        changed_percent,
+        bbox,
+        output_img,
+        diff_crop_offset,
+    ) = match prior_session {
+        None => {
+            // First frame of session: establish baseline
+            manager.update(session_id.clone(), current_img.clone(), 1);
+            (
+                true,
+                1u64,
+                false,
+                0u64,
+                0.0f64,
+                None,
+                current_img,
+                (0u32, 0u32),
+            )
+        }
+        Some(record) => {
+            let diff = output::calculate_image_diff(&current_img, &record.last_image, threshold);
+            let next_frame_idx = record.frame_index + 1;
 
-                if diff.changed && (diff.changed_pixels >= 50 || diff.changed_percent >= 0.05) {
-                    let out_img = if diff_only {
-                        if let Some(ref b) = diff.bbox {
-                            output::crop_to_diff_bbox(current_img.clone(), b, 8)
-                        } else {
-                            current_img.clone()
-                        }
+            if diff.changed && (diff.changed_pixels >= 50 || diff.changed_percent >= 0.05) {
+                let (out_img, crop_off) = if diff_only {
+                    if let Some(ref b) = diff.bbox {
+                        let padding = 8u32;
+                        let px = b.x.saturating_sub(padding);
+                        let py = b.y.saturating_sub(padding);
+                        (
+                            output::crop_to_diff_bbox(current_img.clone(), b, padding),
+                            (px, py),
+                        )
                     } else {
-                        current_img.clone()
-                    };
-
-                    manager.update(session_id.clone(), current_img, next_frame_idx);
-                    (
-                        false,
-                        next_frame_idx,
-                        true,
-                        diff.changed_pixels,
-                        diff.changed_percent,
-                        diff.bbox,
-                        out_img,
-                    )
+                        (current_img.clone(), (0, 0))
+                    }
                 } else {
-                    // No visual change: update access time, return unchanged notice without heavy image
-                    manager.update(session_id.clone(), record.last_image, next_frame_idx);
-                    (
-                        false,
-                        next_frame_idx,
-                        false,
-                        diff.changed_pixels,
-                        diff.changed_percent,
-                        None,
-                        current_img,
-                    )
-                }
+                    (current_img.clone(), (0, 0))
+                };
+
+                manager.update(session_id.clone(), current_img, next_frame_idx);
+                (
+                    false,
+                    next_frame_idx,
+                    true,
+                    diff.changed_pixels,
+                    diff.changed_percent,
+                    diff.bbox,
+                    out_img,
+                    crop_off,
+                )
+            } else {
+                // No visual change: update access time, return unchanged notice without heavy image
+                manager.update(session_id.clone(), record.last_image, next_frame_idx);
+                (
+                    false,
+                    next_frame_idx,
+                    false,
+                    diff.changed_pixels,
+                    diff.changed_percent,
+                    None,
+                    current_img,
+                    (0u32, 0u32),
+                )
             }
-        };
+        }
+    };
+
+    let final_transform = if diff_crop_offset != (0, 0) {
+        crate::coords::CoordinateTransform::new(
+            pipeline_res.transform.screen_origin,
+            pipeline_res.transform.screen_scale_factor,
+            pipeline_res.transform.crop_offset,
+            pipeline_res.transform.image_scale,
+            (
+                pipeline_res.transform.diff_crop_offset.0 + diff_crop_offset.0,
+                pipeline_res.transform.diff_crop_offset.1 + diff_crop_offset.1,
+            ),
+            pipeline_res.transform.canvas_size,
+            (output_img.width(), output_img.height()),
+        )
+    } else {
+        pipeline_res.transform
+    };
 
     let mut content = Vec::new();
 
@@ -417,7 +537,7 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         bbox,
         width: output_img.width(),
         height: output_img.height(),
-        coordinates: Some(pipeline_res.coordinates),
+        coordinates: Some(final_transform.to_info()),
     };
 
     if let Ok(json_text) = serde_json::to_string_pretty(&response_json) {
@@ -434,15 +554,19 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         }
     }
 
+    let format = match &output_path {
+        Some(path) => output::validate_and_infer_format(
+            &OutputDestination::File(path.clone()),
+            explicit_format,
+        )
+        .unwrap_or(explicit_format.unwrap_or(crate::cli::ImageFormat::Png)),
+        None => explicit_format.unwrap_or(crate::cli::ImageFormat::Png),
+    };
+
     // Save to disk if requested
     if let Some(ref path) = output_path {
         let destination = OutputDestination::File(path.clone());
-        if let Err(e) = output::save_image(
-            &output_img,
-            &destination,
-            crate::cli::ImageFormat::Png,
-            None,
-        ) {
+        if let Err(e) = output::save_image(&output_img, &destination, format, None) {
             return ToolCallResult {
                 content: vec![ToolContent::Text {
                     text: format!("Failed to save session image: {e}"),
@@ -454,11 +578,16 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
 
     // Attach base64 image: on first frame, or on visual changes, or when diffOnly is false
     if is_first_frame || changed || !diff_only {
-        if let Ok(bytes) = output::encode_image_bytes(&output_img, crate::cli::ImageFormat::Png, None) {
+        if let Ok(bytes) = output::encode_image_bytes(&output_img, format, None) {
             let b64 = base64_encode(&bytes);
+            let mime_type = match format {
+                crate::cli::ImageFormat::Webp => "image/webp",
+                crate::cli::ImageFormat::Jpeg => "image/jpeg",
+                _ => "image/png",
+            };
             content.push(ToolContent::Image {
                 data: b64,
-                mime_type: "image/png".to_string(),
+                mime_type: mime_type.to_string(),
             });
         }
     }
@@ -497,5 +626,50 @@ mod tests {
         let def = get_session_tool_definition();
         assert_eq!(def.name, "capture_session");
         assert!(def.description.contains("Stateful"));
+
+        let props = def
+            .input_schema
+            .get("properties")
+            .expect("Properties exist");
+        assert!(props.get("format").is_some());
+        assert!(props.get("redactions").is_some());
+        assert!(props.get("maskWindows").is_some());
+        assert!(props.get("excludeWindows").is_some());
+        assert!(props.get("allowMissingMask").is_some());
+    }
+
+    #[test]
+    fn test_session_diff_crop_coordinate_transform_mapping() {
+        use crate::coords::CoordinateTransform;
+
+        // Base uncropped pipeline transform: canvas 1920x1080 at screen (0, 0)
+        let base_transform =
+            CoordinateTransform::new((0, 0), 1.0, (0, 0), 1.0, (0, 0), (1920, 1080), (1920, 1080));
+
+        // Diff detected changes with bbox: x=500, y=300, w=100, h=50
+        // Padding is 8: px = 492, py = 292, pw = 116, ph = 66
+        let diff_crop_offset = (492u32, 292u32);
+        let output_size = (116u32, 66u32);
+
+        let final_transform = CoordinateTransform::new(
+            base_transform.screen_origin,
+            base_transform.screen_scale_factor,
+            base_transform.crop_offset,
+            base_transform.image_scale,
+            diff_crop_offset,
+            base_transform.canvas_size,
+            output_size,
+        );
+
+        let info = final_transform.to_info();
+        assert_eq!(info.diff_crop_offset, (492, 292));
+        assert_eq!(info.output_width, 116);
+        assert_eq!(info.output_height, 66);
+
+        // Top-left of the cropped diff image (0, 0) must map directly to desktop (492, 292)
+        assert_eq!(final_transform.image_to_screen(0, 0), (492, 292));
+        // Screen point (500, 300) must map to (8, 8) in the cropped image
+        assert_eq!(final_transform.screen_to_image(500, 300), (8, 8));
+        assert_eq!(final_transform.image_to_screen(8, 8), (500, 300));
     }
 }

@@ -5,6 +5,31 @@ All notable changes to `rgc-cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.1] - 2026-11-23
+
+### Fixed
+- **Unified CLI & MCP Privacy Policy Inheritance (P0-1)**:
+  - Introduced `config::PrivacyPolicy` guaranteeing that default privacy configurations (`mask_windows`, `exclude_windows`, `mask_regions`, `allow_missing_mask`) from `rgc.toml` are universally inherited across CLI, `capture_screen`, `capture_session`, and `record_screen`.
+  - Request-level privacy arguments are unioned with configured sensitive targets rather than overwriting or bypassing them.
+- **Strict Privacy Mask Resolution & Window State Modeling (P0-2)**:
+  - Modeled privacy mask resolution explicitly (`MaskResolutionStatus::Applied`, `NotVisible`, `NotFound`, `Error`).
+  - Strict mode (`allow_missing_mask = false`) now fails closed with `CaptureError::MaskWindowResolutionFailed` upon window attribute query errors or minimization ambiguity.
+- **Client-Area Coordinate Offset Single-Compensation (P1-1)**:
+  - Corrected window origin and crop offset handling in `capture_window_with_options` under `--client-only`, eliminating double-compensation of `(cx, cy)` in `CoordinateTransform::screen_to_canvas` and `canvas_to_screen`.
+- **Session Diff-Crop Coordinate Space Recalibration (P1-2)**:
+  - Recalculated `CoordinateTransform` and `CoordinateSpaceInfo` when `capture_session` crops to `diff_bbox` (`diffOnly=true`), ensuring returned pixel coordinates map precisely back to physical desktop space.
+- **Session Output Format Matching (P1-3)**:
+  - Dynamically infer image format from `outputPath` extension or explicit `format` parameter in `capture_session`, eliminating mismatched PNG byte output when requesting WebP or JPEG.
+- **MCP Output Directory Whitelist Fail-Closed Enforcement (P1-4)**:
+  - Hardened `validate_mcp_output_path` so that if `RGC_ALLOWED_OUTPUT_DIRS` is set but all paths fail canonicalization, writes fail closed with an explicit error rather than silently bypassing restrictions.
+- **MSRV Dependency Alignment (P1-5)**:
+  - Aligned package `rust-version = "1.88"` with dependency lockfile requirements.
+- **MCP Record Screen Schema & Duration Validation Consistency (P1-6)**:
+  - Added missing parameters (`allowOverwrite`, `excludeWindows`, `allowMissingMask`) to `record_screen` JSON schema.
+  - Aligned duration validation to explicitly enforce the 0.1s to 30.0s recording window with informative errors instead of silent clamping.
+
+---
+
 ## [2.11.0] - 2026-11-23
 
 ### Added

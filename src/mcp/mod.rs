@@ -361,7 +361,8 @@ pub fn run_mcp_loop(reader: impl BufRead, writer: impl Write + Send) -> std::io:
         // Background thread to poll subscribed resources and emit change notifications
         s.spawn(|| {
             let mut last_check = std::time::Instant::now();
-            let mut fingerprints: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+            let mut fingerprints: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
 
             while running.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -805,7 +806,9 @@ mod tests {
         let outside_target = "outside_workspace/unsafe.png";
         let outside_err = validate_mcp_output_path(outside_target, &["png"], true);
         assert!(outside_err.is_err());
-        assert!(outside_err.unwrap_err().contains("outside allowed directories"));
+        assert!(outside_err
+            .unwrap_err()
+            .contains("outside allowed directories"));
 
         std::env::remove_var("RGC_ALLOWED_OUTPUT_DIRS");
     }
@@ -869,5 +872,39 @@ mod tests {
         let resp = handle_mcp_message(req).expect("response expected");
         assert!(resp.contains(r#""isError":true"#));
         assert!(resp.contains("Window capture failed") || resp.contains("No window found"));
+    }
+
+    #[test]
+    fn test_allowed_output_dirs_fail_closed_on_invalid_dirs() {
+        // Configure an invalid non-existent directory
+        std::env::set_var(
+            "RGC_ALLOWED_OUTPUT_DIRS",
+            "Z:\\nonexistent_whitelist_path_9999",
+        );
+        let res = validate_mcp_output_path("capture.png", &["png"], true);
+        std::env::remove_var("RGC_ALLOWED_OUTPUT_DIRS");
+
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err();
+        assert!(err_msg.contains("refusing file write for security"));
+    }
+
+    #[test]
+    fn test_record_screen_schema_and_duration_validation() {
+        let def = crate::mcp::record::get_record_tool_definition();
+        let props = def
+            .input_schema
+            .get("properties")
+            .expect("Properties exist");
+        assert!(props.get("allowOverwrite").is_some());
+        assert!(props.get("excludeWindows").is_some());
+        assert!(props.get("allowMissingMask").is_some());
+        assert!(props.get("format").is_some());
+
+        // Oversized duration (> 30.0s) should return explicit error
+        let req = r#"{"jsonrpc":"2.0","id":72,"method":"tools/call","params":{"name":"record_screen","arguments":{"durationSecs":60.0}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""isError":true"#));
+        assert!(resp.contains("must be a finite number between 0.1 and 30.0 seconds"));
     }
 }

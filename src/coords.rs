@@ -156,15 +156,8 @@ mod tests {
 
     #[test]
     fn test_identity_coordinate_transform() {
-        let transform = CoordinateTransform::new(
-            (0, 0),
-            1.0,
-            (0, 0),
-            1.0,
-            (0, 0),
-            (1920, 1080),
-            (1920, 1080),
-        );
+        let transform =
+            CoordinateTransform::new((0, 0), 1.0, (0, 0), 1.0, (0, 0), (1920, 1080), (1920, 1080));
 
         assert_eq!(transform.screen_to_image(500, 300), (500, 300));
         assert_eq!(transform.image_to_screen(500, 300), (500, 300));
@@ -203,15 +196,8 @@ mod tests {
     #[test]
     fn test_dpi_scale_coordinate_transform() {
         // High-DPI display with scale factor 2.0
-        let transform = CoordinateTransform::new(
-            (0, 0),
-            2.0,
-            (0, 0),
-            1.0,
-            (0, 0),
-            (3840, 2160),
-            (3840, 2160),
-        );
+        let transform =
+            CoordinateTransform::new((0, 0), 2.0, (0, 0), 1.0, (0, 0), (3840, 2160), (3840, 2160));
 
         // Screen point (100, 100) scaled by 2.0 -> (200, 200) on physical canvas
         assert_eq!(transform.screen_to_canvas(100, 100), (200, 200));
@@ -245,5 +231,45 @@ mod tests {
 
         // Roundtrip from image (0, 60) back to screen
         assert_eq!(transform.image_to_screen(0, 60), (2000, 100));
+    }
+
+    #[test]
+    fn test_client_only_coordinate_transform_roundtrip() {
+        // Window on screen at (100, 100), scale factor 1.0
+        // Client area trim has offset (10, 32)
+        let transform = CoordinateTransform::new(
+            (100, 100),
+            1.0,
+            (10, 32),
+            1.0,
+            (0, 0),
+            (800, 600),
+            (780, 558),
+        );
+
+        // Top-left of client area image (0, 0) maps to screen (110, 132)
+        assert_eq!(transform.image_to_screen(0, 0), (110, 132));
+        assert_eq!(transform.screen_to_image(110, 132), (0, 0));
+
+        // Screen coordinate (200, 200) maps to image (90, 68)
+        assert_eq!(transform.screen_to_image(200, 200), (90, 68));
+        assert_eq!(transform.image_to_screen(90, 68), (200, 200));
+
+        // Negative screen coordinates (multi-monitor setup with secondary monitor to the left)
+        let neg_transform = CoordinateTransform::new(
+            (-1920, 100),
+            1.5,
+            (12, 48), // client area offset in physical pixels (8px, 32px logical)
+            1.0,
+            (0, 0),
+            (1920, 1080),
+            (1896, 1020),
+        );
+
+        // Client area (0, 0) back to screen:
+        // phys_x = 12 / 1.5 = 8 -> -1920 + 8 = -1912
+        // phys_y = 48 / 1.5 = 32 -> 100 + 32 = 132
+        assert_eq!(neg_transform.image_to_screen(0, 0), (-1912, 132));
+        assert_eq!(neg_transform.screen_to_image(-1912, 132), (0, 0));
     }
 }

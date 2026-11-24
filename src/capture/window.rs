@@ -202,7 +202,12 @@ pub fn calculate_client_area_bounds(
     if remove_titlebar {
         // Standard Windows/macOS titlebar height is ~32px scaled
         let titlebar_h = ((32.0 * scale_factor).round() as u32).min(content_h.saturating_sub(40));
-        (content_x, content_y + titlebar_h, content_w, content_h.saturating_sub(titlebar_h).max(1))
+        (
+            content_x,
+            content_y + titlebar_h,
+            content_w,
+            content_h.saturating_sub(titlebar_h).max(1),
+        )
     } else {
         (content_x, content_y, content_w, content_h)
     }
@@ -225,8 +230,8 @@ pub fn capture_window_with_options(
         return Err(CaptureError::WindowMinimized(id, title));
     }
 
-    let mut win_x = target.x().unwrap_or(0);
-    let mut win_y = target.y().unwrap_or(0);
+    let win_x = target.x().unwrap_or(0);
+    let win_y = target.y().unwrap_or(0);
 
     debug!(
         "Capturing window id={}, title={:?}, origin=({}, {})",
@@ -255,8 +260,6 @@ pub fn capture_window_with_options(
             );
             let cropped = image::imageops::crop_imm(&img, cx, cy, cw, ch).to_image();
             img = DynamicImage::ImageRgba8(cropped);
-            win_x += cx as i32;
-            win_y += cy as i32;
             base_crop_offset = (cx, cy);
         }
     }

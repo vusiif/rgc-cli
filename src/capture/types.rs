@@ -29,6 +29,9 @@ pub enum CaptureError {
     #[error("Mask window target '{0}' was not found on desktop")]
     MaskWindowNotFound(String),
 
+    #[error("Failed to resolve privacy mask for window '{query}': {reason}")]
+    MaskWindowResolutionFailed { query: String, reason: String },
+
     #[error("Cannot capture window #{0} ('{1}') because it is minimized")]
     WindowMinimized(u32, String),
 
@@ -104,6 +107,16 @@ impl From<CaptureError> for ApiError {
             .with_stage("mask_window_lookup")
             .with_suggestion(
                 "Verify active windows with --list-windows, or pass --allow-missing-mask to ignore nonexistent mask windows.",
+            ),
+            CaptureError::MaskWindowResolutionFailed { query, reason } => ApiError::new(
+                ErrorCode::BadArgs,
+                format!(
+                    "Failed to resolve privacy mask for window '{query}': {reason}. Aborting export to prevent sensitive information leakage."
+                ),
+            )
+            .with_stage("mask_window_lookup")
+            .with_suggestion(
+                "Check window state or pass --allow-missing-mask to permit capturing if privacy mask cannot be resolved.",
             ),
             CaptureError::WindowMinimized(id, title) => ApiError::new(
                 ErrorCode::CaptureFailed,

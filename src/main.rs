@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "256"]
+#![allow(clippy::chunks_exact_to_as_chunks)]
 
 pub mod accessibility;
 pub mod action;
@@ -613,16 +614,31 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
                 if !matches.is_empty() {
                     println!("Template Matches: found {} occurrences", matches.len());
                     for (idx, m) in matches.iter().enumerate() {
-                        let scx = m.screen_center_x.map(|v| v.to_string()).unwrap_or_else(|| "N/A".to_string());
-                        let scy = m.screen_center_y.map(|v| v.to_string()).unwrap_or_else(|| "N/A".to_string());
+                        let scx = m
+                            .screen_center_x
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "N/A".to_string());
+                        let scy = m
+                            .screen_center_y
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "N/A".to_string());
                         println!(
                             "  [{}] ({}, {}) {}x{} (conf: {:.1}%) -> Screen Click: ({}, {})",
-                            idx + 1, m.x, m.y, m.width, m.height, m.confidence * 100.0,
-                            scx, scy
+                            idx + 1,
+                            m.x,
+                            m.y,
+                            m.width,
+                            m.height,
+                            m.confidence * 100.0,
+                            scx,
+                            scy
                         );
                     }
                 } else {
-                    println!("Template Matches: no match found above threshold {:.2}", args.template_threshold);
+                    println!(
+                        "Template Matches: no match found above threshold {:.2}",
+                        args.template_threshold
+                    );
                 }
             }
             if let Some(ref ver) = action_verification_result {
@@ -893,19 +909,21 @@ fn print_json_success<T: serde::Serialize>(data: T) -> Result<(), ApiError> {
 }
 
 fn apply_config_to_cli(args: &mut Cli, cfg: &config::RgcConfig) {
-    if args.mask_window.is_empty() {
-        for w in &cfg.privacy.mask_windows {
-            if let Ok(mw) = w.parse::<cli::MaskWindow>() {
-                args.mask_window.push(mw);
-            }
-        }
-    }
-
-    if args.exclude_window.is_empty() {
-        for w in &cfg.privacy.exclude_windows {
-            args.exclude_window.push(w.clone());
-        }
-    }
+    let policy = config::PrivacyPolicy::from_config_and_request(
+        &cfg.privacy,
+        &args.mask_window,
+        &args.exclude_window,
+        &args.mask,
+        if args.allow_missing_mask {
+            Some(true)
+        } else {
+            None
+        },
+    );
+    args.mask_window = policy.mask_windows;
+    args.exclude_window = policy.exclude_windows;
+    args.mask = policy.mask_regions;
+    args.allow_missing_mask = policy.allow_missing_mask;
 
     if !args.accessibility {
         if let Some(a) = cfg.defaults.accessibility {
@@ -916,20 +934,6 @@ fn apply_config_to_cli(args: &mut Cli, cfg: &config::RgcConfig) {
     if !args.som {
         if let Some(s) = cfg.defaults.som {
             args.som = s;
-        }
-    }
-
-    if args.mask.is_empty() {
-        for r in &cfg.privacy.mask_regions {
-            if let Ok(mr) = r.parse::<cli::MaskRegion>() {
-                args.mask.push(mr);
-            }
-        }
-    }
-
-    if !args.allow_missing_mask {
-        if let Some(amm) = cfg.privacy.allow_missing_mask {
-            args.allow_missing_mask = amm;
         }
     }
 
@@ -979,7 +983,9 @@ fn run_watch_mode(
 ) -> Result<(), ApiError> {
     let interval = Duration::from_millis(interval_ms.max(20));
     let start_time = Instant::now();
-    let timeout = args.watch_timeout.map(|s| Duration::from_secs_f32(s.max(0.1)));
+    let timeout = args
+        .watch_timeout
+        .map(|s| Duration::from_secs_f32(s.max(0.1)));
 
     if !args.quiet && !args.json {
         println!(
@@ -1005,11 +1011,14 @@ fn run_watch_mode(
         sleep(interval);
 
         let current = capture_target(args)?;
-        let diff = output::calculate_image_diff(&current.image, &baseline.image, args.watch_threshold);
+        let diff =
+            output::calculate_image_diff(&current.image, &baseline.image, args.watch_threshold);
 
         if diff.changed && diff.changed_percent >= args.watch_min_percent {
             event_count += 1;
-            let now_str = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+            let now_str = chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string();
 
             let saved_path_str = match &destination {
                 OutputDestination::Directory(dir) => {
@@ -1056,7 +1065,10 @@ fn run_watch_mode(
             if let Some(limit) = args.watch_count {
                 if event_count >= limit {
                     if !args.quiet && !args.json {
-                        println!("Reached target change count ({}), exiting watch mode.", limit);
+                        println!(
+                            "Reached target change count ({}), exiting watch mode.",
+                            limit
+                        );
                     }
                     break;
                 }

@@ -1,9 +1,25 @@
-use log::debug;
+use log::{debug, warn};
 use xcap::Window;
 
 use crate::capture::types::CaptureError;
 use crate::capture::window::find_window;
 use crate::cli::{CoordMode, MaskEffect, MaskRegion, MaskWindow, Region};
+
+/// Status of window privacy mask resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaskResolutionStatus {
+    Applied {
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    },
+    NotVisible {
+        reason: String,
+    },
+    NotFound,
+    Error(String),
+}
 
 /// Resolve a mask region from user coordinates (logical or physical) to physical canvas pixels.
 /// Clamps to canvas dimensions. If the region is completely outside, returns None.
@@ -173,14 +189,98 @@ pub fn build_redactions(
         for wm in window_masks {
             match find_window(win_list, &wm.query) {
                 Ok(target_win) => {
-                    if target_win.is_minimized().unwrap_or(false) {
-                        debug!("Mask window target '{}' is minimized, skipping", wm.query);
-                        continue;
+                    // Check minimization state
+                    match target_win.is_minimized() {
+                        Ok(true) => {
+                            warn!(
+                                "Mask window target '{}' is confirmed minimized (not visible on screen)",
+                                wm.query
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            if !allow_missing_window {
+                                return Err(CaptureError::MaskWindowResolutionFailed {
+                                    query: wm.query.clone(),
+                                    reason: format!(
+                                        "Failed to determine window minimization state: {e}"
+                                    ),
+                                });
+                            } else {
+                                warn!(
+                                    "Failed to query minimization state for mask target '{}': {e}",
+                                    wm.query
+                                );
+                            }
+                        }
+                        Ok(false) => {}
                     }
-                    let win_x = target_win.x().unwrap_or(0);
-                    let win_y = target_win.y().unwrap_or(0);
-                    let win_w = target_win.width().unwrap_or(0);
-                    let win_h = target_win.height().unwrap_or(0);
+
+                    let win_x = match target_win.x() {
+                        Ok(x) => x,
+                        Err(e) => {
+                            if !allow_missing_window {
+                                return Err(CaptureError::MaskWindowResolutionFailed {
+                                    query: wm.query.clone(),
+                                    reason: format!("Failed to query window X coordinate: {e}"),
+                                });
+                            } else {
+                                warn!(
+                                    "Failed to query window X coordinate for '{}': {e}",
+                                    wm.query
+                                );
+                                continue;
+                            }
+                        }
+                    };
+
+                    let win_y = match target_win.y() {
+                        Ok(y) => y,
+                        Err(e) => {
+                            if !allow_missing_window {
+                                return Err(CaptureError::MaskWindowResolutionFailed {
+                                    query: wm.query.clone(),
+                                    reason: format!("Failed to query window Y coordinate: {e}"),
+                                });
+                            } else {
+                                warn!(
+                                    "Failed to query window Y coordinate for '{}': {e}",
+                                    wm.query
+                                );
+                                continue;
+                            }
+                        }
+                    };
+
+                    let win_w = match target_win.width() {
+                        Ok(w) => w,
+                        Err(e) => {
+                            if !allow_missing_window {
+                                return Err(CaptureError::MaskWindowResolutionFailed {
+                                    query: wm.query.clone(),
+                                    reason: format!("Failed to query window width: {e}"),
+                                });
+                            } else {
+                                warn!("Failed to query window width for '{}': {e}", wm.query);
+                                continue;
+                            }
+                        }
+                    };
+
+                    let win_h = match target_win.height() {
+                        Ok(h) => h,
+                        Err(e) => {
+                            if !allow_missing_window {
+                                return Err(CaptureError::MaskWindowResolutionFailed {
+                                    query: wm.query.clone(),
+                                    reason: format!("Failed to query window height: {e}"),
+                                });
+                            } else {
+                                warn!("Failed to query window height for '{}': {e}", wm.query);
+                                continue;
+                            }
+                        }
+                    };
 
                     if let Some((x, y, w, h)) = resolve_window_mask_bounds(
                         win_x,
@@ -200,9 +300,9 @@ pub fn build_redactions(
                         );
                         redactions.push((x, y, w, h, wm.effect));
                     } else {
-                        debug!(
-                            "Window mask '{}' does not intersect captured screen area",
-                            wm.query
+                        warn!(
+                            "Window mask target '{}' at ({},{}) {}x{} does not intersect captured screen area",
+                            wm.query, win_x, win_y, win_w, win_h
                         );
                     }
                 }
@@ -210,7 +310,7 @@ pub fn build_redactions(
                     if !allow_missing_window {
                         return Err(CaptureError::MaskWindowNotFound(wm.query.clone()));
                     } else {
-                        debug!(
+                        warn!(
                             "Window mask target '{}' not found on desktop: {}",
                             wm.query, e
                         );
@@ -355,5 +455,31 @@ mod tests {
         );
         assert!(ok_res.is_ok());
         assert_eq!(ok_res.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_mask_resolution_status_modeling() {
+        let applied = MaskResolutionStatus::Applied {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 50,
+        };
+        let not_visible = MaskResolutionStatus::NotVisible {
+            reason: "minimized".to_string(),
+        };
+        let not_found = MaskResolutionStatus::NotFound;
+        let err = MaskResolutionStatus::Error("XCap failed".to_string());
+
+        assert!(matches!(
+            applied,
+            MaskResolutionStatus::Applied { x: 10, .. }
+        ));
+        assert!(matches!(
+            not_visible,
+            MaskResolutionStatus::NotVisible { .. }
+        ));
+        assert_eq!(not_found, MaskResolutionStatus::NotFound);
+        assert!(matches!(err, MaskResolutionStatus::Error(_)));
     }
 }

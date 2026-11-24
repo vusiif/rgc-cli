@@ -319,7 +319,11 @@ pub fn query_system_accessibility_nodes(
             let height = w.height().unwrap_or(0);
             let is_minimized = w.is_minimized().unwrap_or(false);
 
-            if is_minimized || width == 0 || height == 0 || (title.is_empty() && app_name.is_empty()) {
+            if is_minimized
+                || width == 0
+                || height == 0
+                || (title.is_empty() && app_name.is_empty())
+            {
                 continue;
             }
 
@@ -337,13 +341,7 @@ pub fn query_system_accessibility_nodes(
             };
 
             nodes.push(AccessibilityNode::new(
-                x,
-                y,
-                width,
-                height,
-                "Window",
-                label,
-                true,
+                x, y, width, height, "Window", label, true,
             ));
         }
     }
@@ -386,7 +384,7 @@ mod tests {
     #[test]
     fn test_containment_ratio() {
         let inner = (10, 10, 20, 20); // area 400
-        let outer = (0, 0, 100, 100);  // contains inner completely
+        let outer = (0, 0, 100, 100); // contains inner completely
         assert!((containment_ratio(inner, outer) - 1.0).abs() < 1e-4);
 
         let outer_half = (10, 10, 10, 20); // overlaps half of inner (area 200)
@@ -399,7 +397,7 @@ mod tests {
 
         // Create visual elements
         let mut elements = vec![
-            UiElement::new(1, 100, 100, 80, 30), // Vision button
+            UiElement::new(1, 100, 100, 80, 30),  // Vision button
             UiElement::new(2, 500, 500, 200, 40), // Vision input
         ];
 
@@ -414,7 +412,15 @@ mod tests {
         // Accessibility nodes
         let a11y_nodes = vec![
             AccessibilityNode::new(98, 98, 84, 34, "Button", Some("Submit".to_string()), true),
-            AccessibilityNode::new(495, 495, 210, 45, "Edit", Some("Username".to_string()), true),
+            AccessibilityNode::new(
+                495,
+                495,
+                210,
+                45,
+                "Edit",
+                Some("Username".to_string()),
+                true,
+            ),
             AccessibilityNode::new(800, 800, 60, 30, "Button", Some("Cancel".to_string()), true), // Missed by vision
         ];
 

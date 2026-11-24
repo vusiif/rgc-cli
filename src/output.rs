@@ -366,7 +366,11 @@ pub fn resolve_unique_auto_path(dir: &Path, format: ImageFormat) -> Result<PathB
         let candidate = dir.join(generate_default_filename(format));
         // Atomic exclusivity check: create_new(true) prevents multiple concurrent processes
         // from claiming the exact same candidate filename.
-        match fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
             Ok(_) => return Ok(candidate),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
@@ -562,11 +566,9 @@ impl<W: std::io::Write> GifStreamEncoder<W> {
             if (w, h) != (first_w, first_h) {
                 return Err(OutputError::SaveFailed {
                     path: PathBuf::from("stream.gif"),
-                    source: image::ImageError::Parameter(
-                        image::error::ParameterError::from_kind(
-                            image::error::ParameterErrorKind::DimensionMismatch,
-                        ),
-                    ),
+                    source: image::ImageError::Parameter(image::error::ParameterError::from_kind(
+                        image::error::ParameterErrorKind::DimensionMismatch,
+                    )),
                 });
             }
         } else {
@@ -702,11 +704,9 @@ impl<W: std::io::Write + std::io::Seek> WebpStreamEncoder<W> {
             if (w, h) != (first_w, first_h) {
                 return Err(OutputError::SaveFailed {
                     path: PathBuf::from("stream.webp"),
-                    source: image::ImageError::Parameter(
-                        image::error::ParameterError::from_kind(
-                            image::error::ParameterErrorKind::DimensionMismatch,
-                        ),
-                    ),
+                    source: image::ImageError::Parameter(image::error::ParameterError::from_kind(
+                        image::error::ParameterErrorKind::DimensionMismatch,
+                    )),
                 });
             }
         } else {
@@ -755,16 +755,13 @@ impl<W: std::io::Write + std::io::Seek> WebpStreamEncoder<W> {
             })?;
 
         let raw_bytes = single_buf.into_inner();
-        let subchunks = extract_frame_subchunks(&raw_bytes).ok_or_else(|| {
-            OutputError::SaveFailed {
+        let subchunks =
+            extract_frame_subchunks(&raw_bytes).ok_or_else(|| OutputError::SaveFailed {
                 path: PathBuf::from("frame.webp"),
-                source: image::ImageError::Decoding(
-                    image::error::DecodingError::from_format_hint(
-                        image::error::ImageFormatHint::Exact(image::ImageFormat::WebP),
-                    ),
-                ),
-            }
-        })?;
+                source: image::ImageError::Decoding(image::error::DecodingError::from_format_hint(
+                    image::error::ImageFormatHint::Exact(image::ImageFormat::WebP),
+                )),
+            })?;
 
         // 4. Wrap into ANMF chunk
         let payload_size = 16 + subchunks.len();
@@ -936,9 +933,9 @@ impl RecordingStreamEncoder<std::io::BufWriter<std::fs::File>> {
                 WebpStreamEncoder::create_file(path, fps)?,
             ))
         } else {
-            Ok(RecordingStreamEncoder::Gif(
-                GifStreamEncoder::create_file(path, fps)?,
-            ))
+            Ok(RecordingStreamEncoder::Gif(GifStreamEncoder::create_file(
+                path, fps,
+            )?))
         }
     }
 }

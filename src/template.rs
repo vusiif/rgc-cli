@@ -264,7 +264,8 @@ pub fn find_template_matches(
                         let src_start = (y + ty) * target_w + x;
                         let tpl_start = ty * t_w;
                         let src_slice = &canvas.pixels[src_start..src_start + t_w];
-                        let tpl_slice = &prep_template.normalized_pixels[tpl_start..tpl_start + t_w];
+                        let tpl_slice =
+                            &prep_template.normalized_pixels[tpl_start..tpl_start + t_w];
                         for (s, t) in src_slice.iter().zip(tpl_slice.iter()) {
                             cross += s * t;
                         }
@@ -291,7 +292,11 @@ pub fn find_template_matches(
 
                 if denom > 1e-6 {
                     let ncc = cross_sum / denom;
-                    let target_thresh = if coarse_step > 1 { coarse_threshold } else { threshold_f64 };
+                    let target_thresh = if coarse_step > 1 {
+                        coarse_threshold
+                    } else {
+                        threshold_f64
+                    };
 
                     if ncc >= target_thresh {
                         raw_candidates.push((x, y, ncc));
@@ -305,75 +310,77 @@ pub fn find_template_matches(
     }
 
     // Refinement stage if coarse scan was used
-    let mut refined_matches: Vec<(usize, usize, f64)> = if coarse_step > 1 && !raw_candidates.is_empty() {
-        let mut refined = Vec::with_capacity(raw_candidates.len());
-        for (cx, cy, _) in raw_candidates {
-            let rx0 = cx.saturating_sub(1);
-            let ry0 = cy.saturating_sub(1);
-            let rx1 = (cx + 1).min(max_x);
-            let ry1 = (cy + 1).min(max_y);
+    let mut refined_matches: Vec<(usize, usize, f64)> =
+        if coarse_step > 1 && !raw_candidates.is_empty() {
+            let mut refined = Vec::with_capacity(raw_candidates.len());
+            for (cx, cy, _) in raw_candidates {
+                let rx0 = cx.saturating_sub(1);
+                let ry0 = cy.saturating_sub(1);
+                let rx1 = (cx + 1).min(max_x);
+                let ry1 = (cy + 1).min(max_y);
 
-            let mut best_ncc = 0.0f64;
-            let mut best_coord = (cx, cy);
+                let mut best_ncc = 0.0f64;
+                let mut best_coord = (cx, cy);
 
-            for fy in ry0..=ry1 {
-                for fx in rx0..=rx1 {
-                    let (patch_variance, cross_sum) = if has_full_alpha {
-                        let sum = canvas.query_sum(fx, fy, t_w, t_h);
-                        let sum_sq = canvas.query_sum_sq(fx, fy, t_w, t_h);
-                        let var = sum_sq - (sum * sum) / prep_template.active_count;
+                for fy in ry0..=ry1 {
+                    for fx in rx0..=rx1 {
+                        let (patch_variance, cross_sum) = if has_full_alpha {
+                            let sum = canvas.query_sum(fx, fy, t_w, t_h);
+                            let sum_sq = canvas.query_sum_sq(fx, fy, t_w, t_h);
+                            let var = sum_sq - (sum * sum) / prep_template.active_count;
 
-                        if var <= 1e-4 {
-                            (var, 0.0)
-                        } else {
-                            let mut cross = 0.0f64;
-                            for ty in 0..t_h {
-                                let src_start = (fy + ty) * target_w + fx;
-                                let tpl_start = ty * t_w;
-                                let src_slice = &canvas.pixels[src_start..src_start + t_w];
-                                let tpl_slice = &prep_template.normalized_pixels[tpl_start..tpl_start + t_w];
-                                for (s, t) in src_slice.iter().zip(tpl_slice.iter()) {
-                                    cross += s * t;
+                            if var <= 1e-4 {
+                                (var, 0.0)
+                            } else {
+                                let mut cross = 0.0f64;
+                                for ty in 0..t_h {
+                                    let src_start = (fy + ty) * target_w + fx;
+                                    let tpl_start = ty * t_w;
+                                    let src_slice = &canvas.pixels[src_start..src_start + t_w];
+                                    let tpl_slice = &prep_template.normalized_pixels
+                                        [tpl_start..tpl_start + t_w];
+                                    for (s, t) in src_slice.iter().zip(tpl_slice.iter()) {
+                                        cross += s * t;
+                                    }
                                 }
+                                (var, cross)
                             }
+                        } else {
+                            let mut p_sum = 0.0f64;
+                            let mut p_sum_sq = 0.0f64;
+                            let mut cross = 0.0f64;
+                            for &(tx, ty, t_val) in &prep_template.active_offsets {
+                                let val = canvas.pixels[(fy + ty) * target_w + (fx + tx)];
+                                p_sum += val;
+                                p_sum_sq += val * val;
+                                cross += val * t_val;
+                            }
+                            let var = p_sum_sq - (p_sum * p_sum) / prep_template.active_count;
                             (var, cross)
-                        }
-                    } else {
-                        let mut p_sum = 0.0f64;
-                        let mut p_sum_sq = 0.0f64;
-                        let mut cross = 0.0f64;
-                        for &(tx, ty, t_val) in &prep_template.active_offsets {
-                            let val = canvas.pixels[(fy + ty) * target_w + (fx + tx)];
-                            p_sum += val;
-                            p_sum_sq += val * val;
-                            cross += val * t_val;
-                        }
-                        let var = p_sum_sq - (p_sum * p_sum) / prep_template.active_count;
-                        (var, cross)
-                    };
+                        };
 
-                    if patch_variance > 1e-4 {
-                        let patch_norm = patch_variance.sqrt();
-                        let denom = prep_template.template_norm * patch_norm;
-                        if denom > 1e-6 {
-                            let ncc = cross_sum / denom;
-                            if ncc > best_ncc {
-                                best_ncc = ncc;
-                                best_coord = (fx, fy);
+                        if patch_variance > 1e-4 {
+                            let patch_norm = patch_variance.sqrt();
+                            let denom = prep_template.template_norm * patch_norm;
+                            if denom > 1e-6 {
+                                let ncc = cross_sum / denom;
+                                if ncc > best_ncc {
+                                    best_ncc = ncc;
+                                    best_coord = (fx, fy);
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            if best_ncc >= threshold_f64 {
-                refined.push((best_coord.0, best_coord.1, best_ncc));
+                if best_ncc >= threshold_f64 {
+                    refined.push((best_coord.0, best_coord.1, best_ncc));
+                }
             }
-        }
-        refined
-    } else {
-        raw_candidates
-    };
+            refined
+        } else {
+            raw_candidates
+        };
 
     if refined_matches.is_empty() {
         return Vec::new();
@@ -384,7 +391,8 @@ pub fn find_template_matches(
 
     // Non-Maximum Suppression (NMS)
     let mut selected_matches = Vec::with_capacity(max_matches);
-    let suppression_dist_sq = ((t_w / 2).max(4) * (t_w / 2).max(4) + (t_h / 2).max(4) * (t_h / 2).max(4)) as i64;
+    let suppression_dist_sq =
+        ((t_w / 2).max(4) * (t_w / 2).max(4) + (t_h / 2).max(4) * (t_h / 2).max(4)) as i64;
 
     for (x, y, conf) in refined_matches {
         let mut suppressed = false;

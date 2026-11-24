@@ -236,6 +236,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "drag": {
                         "description": "Optional drag trajectory coordinate(s) in 'X1,Y1,X2,Y2' or 'X1,Y1,X2,Y2,LABEL' format (string or array of strings) to overlay directional dashed trajectory arrows."
+                    },
+                    "allowMissingMask": {
+                        "type": "boolean",
+                        "description": "Optional flag to permit capture if a configured or requested mask window is missing or not visible."
                     }
                 },
                 "additionalProperties": false
@@ -371,15 +375,22 @@ pub fn validate_mcp_output_path(
 
     // Allowed directories check (if RGC_ALLOWED_OUTPUT_DIRS environment variable is set)
     if let Ok(allowed_dirs_var) = std::env::var("RGC_ALLOWED_OUTPUT_DIRS") {
-        let allowed_dirs: Vec<PathBuf> = allowed_dirs_var
-            .split([',', ';'])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .filter_map(|pb| pb.canonicalize().ok())
-            .collect();
+        let trimmed_var = allowed_dirs_var.trim();
+        if !trimmed_var.is_empty() {
+            let allowed_dirs: Vec<PathBuf> = trimmed_var
+                .split([',', ';'])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .filter_map(|pb| pb.canonicalize().ok())
+                .collect();
 
-        if !allowed_dirs.is_empty() {
+            if allowed_dirs.is_empty() {
+                return Err(format!(
+                    "RGC_ALLOWED_OUTPUT_DIRS is configured ('{allowed_dirs_var}') but contains no valid or accessible directories; refusing file write for security."
+                ));
+            }
+
             let abs_path = if p.is_relative() {
                 std::env::current_dir()
                     .map(|cwd| cwd.join(p))
@@ -539,17 +550,19 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .unwrap_or(false);
 
     let output_path = match arguments.get("outputPath").and_then(|v| v.as_str()) {
-        Some(s) => match validate_mcp_output_path(s, &["png", "jpg", "jpeg", "webp"], allow_overwrite) {
-            Ok(pb) => Some(pb),
-            Err(e) => {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Invalid outputPath: {e}"),
-                    }],
-                    is_error: true,
-                };
+        Some(s) => {
+            match validate_mcp_output_path(s, &["png", "jpg", "jpeg", "webp"], allow_overwrite) {
+                Ok(pb) => Some(pb),
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!("Invalid outputPath: {e}"),
+                        }],
+                        is_error: true,
+                    };
+                }
             }
-        },
+        }
         None => None,
     };
 
@@ -692,9 +705,18 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
     };
 
     let find_template_str = arguments.get("findTemplate").and_then(|v| v.as_str());
-    let template_threshold = arguments.get("templateThreshold").and_then(|v| v.as_f64()).unwrap_or(0.85) as f32;
-    let template_max_matches = arguments.get("templateMaxMatches").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-    let highlight_template = arguments.get("highlightTemplate").and_then(|v| v.as_bool()).unwrap_or(false);
+    let template_threshold = arguments
+        .get("templateThreshold")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.85) as f32;
+    let template_max_matches = arguments
+        .get("templateMaxMatches")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1) as usize;
+    let highlight_template = arguments
+        .get("highlightTemplate")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let preloaded_template_match = if let Some(tpl_str) = find_template_str {
         let trimmed = tpl_str.trim();
@@ -1000,13 +1022,23 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         }
     };
 
+    let request_allow_missing = arguments.get("allowMissingMask").and_then(|v| v.as_bool());
+    let cfg = crate::config::get_active_config();
+    let privacy_policy = crate::config::PrivacyPolicy::from_config_and_request(
+        &cfg.privacy,
+        &window_masks,
+        &exclude_windows,
+        &manual_masks,
+        request_allow_missing,
+    );
+
     let pipeline_options = crate::pipeline::PipelineOptions {
         cursor: cursor_flag,
         highlight_cursor: highlight_cursor_flag,
-        manual_masks,
-        mask_windows: window_masks,
-        exclude_windows,
-        allow_missing_mask: false,
+        manual_masks: privacy_policy.mask_regions,
+        mask_windows: privacy_policy.mask_windows,
+        exclude_windows: privacy_policy.exclude_windows,
+        allow_missing_mask: privacy_policy.allow_missing_mask,
         coords_mode: coords,
         scale,
         max_dimension,
@@ -1251,7 +1283,8 @@ pub fn execute_find_template_tool(arguments: &serde_json::Value) -> ToolCallResu
     let img_w = rgba.width();
     let img_h = rgba.height();
 
-    let mut matches = crate::template::find_template_matches(&rgba, &tpl_img, threshold, max_matches);
+    let mut matches =
+        crate::template::find_template_matches(&rgba, &tpl_img, threshold, max_matches);
     let transform = crate::coords::CoordinateTransform::new(
         origin,
         scale_factor,
