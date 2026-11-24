@@ -947,7 +947,7 @@ mod tests {
         let oversize_len = 32 * 1024 * 1024 + 10;
         let mut huge_str = String::with_capacity(prefix.len() + oversize_len);
         huge_str.push_str(prefix);
-        huge_str.extend(std::iter::repeat('A').take(oversize_len));
+        huge_str.extend(std::iter::repeat_n('A', oversize_len));
 
         let res = load_untrusted_image_input(&huge_str, "template");
         assert!(res.is_err());

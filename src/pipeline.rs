@@ -478,9 +478,11 @@ mod tests {
     #[test]
     fn test_execute_image_pipeline_with_scaling_and_cursor() {
         let raw = DynamicImage::new_rgba8(400, 400);
-        let mut options = PipelineOptions::default();
-        options.scale = Some(0.5);
-        options.global_cursor_override = Some((100, 100));
+        let options = PipelineOptions {
+            scale: Some(0.5),
+            global_cursor_override: Some((100, 100)),
+            ..Default::default()
+        };
 
         let result = execute_image_pipeline(raw, 1.0, (0, 0), Some((0, 0)), &options)
             .expect("Pipeline execution with scale should succeed");
@@ -509,10 +511,12 @@ mod tests {
             }
         }
 
-        let mut options = PipelineOptions::default();
-        options.som = true;
-        options.som_threshold = 10;
-        options.scale = Some(0.5);
+        let options = PipelineOptions {
+            som: true,
+            som_threshold: 10,
+            scale: Some(0.5),
+            ..Default::default()
+        };
 
         let result = execute_image_pipeline(
             DynamicImage::ImageRgba8(raw),
@@ -544,16 +548,18 @@ mod tests {
             }
         }
 
-        let mut options = PipelineOptions::default();
-        options.diff_ref = Some(DynamicImage::ImageRgba8(ref_rgba));
-        options.diff_threshold = 10;
-        options.crop_changed = true;
-        options.highlight_diff = true;
-        options.clicks = vec![ClickMarker {
-            x: 10,
-            y: 10,
-            label: Some("Test".to_string()),
-        }];
+        let options = PipelineOptions {
+            diff_ref: Some(DynamicImage::ImageRgba8(ref_rgba)),
+            diff_threshold: 10,
+            crop_changed: true,
+            highlight_diff: true,
+            clicks: vec![ClickMarker {
+                x: 10,
+                y: 10,
+                label: Some("Test".to_string()),
+            }],
+            ..Default::default()
+        };
 
         let result = execute_image_pipeline(raw, 1.0, (0, 0), Some((0, 0)), &options)
             .expect("Diff pipeline should succeed");
@@ -569,18 +575,20 @@ mod tests {
     #[test]
     fn test_execute_image_pipeline_accessibility_fusion() {
         let raw = DynamicImage::new_rgba8(400, 300);
-        let mut options = PipelineOptions::default();
-        options.som = true;
-        options.accessibility = true;
-        options.a11y_nodes_override = Some(vec![crate::accessibility::AccessibilityNode::new(
-            50,
-            50,
-            100,
-            40,
-            "Button",
-            Some("OK".to_string()),
-            true,
-        )]);
+        let options = PipelineOptions {
+            som: true,
+            accessibility: true,
+            a11y_nodes_override: Some(vec![crate::accessibility::AccessibilityNode::new(
+                50,
+                50,
+                100,
+                40,
+                "Button",
+                Some("OK".to_string()),
+                true,
+            )]),
+            ..Default::default()
+        };
 
         let result = execute_image_pipeline(raw, 1.0, (0, 0), Some((0, 0)), &options)
             .expect("Accessibility pipeline should succeed");
@@ -606,13 +614,15 @@ mod tests {
             raw_rgba.put_pixel(60 + x, 40 + y, *p);
         }
 
-        let mut options = PipelineOptions::default();
-        options.template_match = Some(crate::template::TemplateMatchOptions {
-            template: DynamicImage::ImageRgba8(icon),
-            threshold: 0.90,
-            max_matches: 1,
-            highlight: true,
-        });
+        let options = PipelineOptions {
+            template_match: Some(crate::template::TemplateMatchOptions {
+                template: DynamicImage::ImageRgba8(icon),
+                threshold: 0.90,
+                max_matches: 1,
+                highlight: true,
+            }),
+            ..Default::default()
+        };
 
         let result = execute_image_pipeline(
             DynamicImage::ImageRgba8(raw_rgba),
@@ -637,9 +647,11 @@ mod tests {
     #[test]
     fn test_process_recording_frame_pipeline() {
         let mut raw_rgba = DynamicImage::new_rgba8(200, 200).into_rgba8();
-        let mut options = RecordingFrameOptions::default();
-        options.scale = Some(0.5);
-        options.grid = Some(20);
+        let options = RecordingFrameOptions {
+            scale: Some(0.5),
+            grid: Some(20),
+            ..Default::default()
+        };
 
         let processed = process_recording_frame(&mut raw_rgba, 1.0, (0, 0), None, &options)
             .expect("Frame processing should succeed");
