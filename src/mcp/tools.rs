@@ -922,91 +922,53 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let capture_once = || {
-        if all_monitors {
-            capture::capture_all_monitors_with_details(region.as_ref(), coords)
-                .map(|c| {
-                    (
-                        c.image,
-                        c.scale_factor,
-                        c.crop_offset,
-                        Some(c.monitor_origin),
-                    )
-                })
-                .map_err(|e| format!("Panorama capture failed: {e}"))
-        } else if let Some(win_val) = arguments.get("window") {
-            let win_query = match win_val.as_str() {
-                Some(s) => s,
-                None => {
-                    return Err(
-                        "Invalid 'window' parameter: expected a string window ID or title"
+    let target = if all_monitors {
+        capture::CaptureTarget::AllMonitors
+    } else if let Some(win_val) = arguments.get("window") {
+        let win_query = match win_val.as_str() {
+            Some(s) => s,
+            None => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: "Invalid 'window' parameter: expected a string window ID or title"
                             .to_string(),
-                    );
-                }
-            };
-            let client_only = arguments
-                .get("clientOnly")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            capture::capture_window_with_options(win_query, region.as_ref(), client_only)
-                .map(|c| {
-                    (
-                        c.image,
-                        c.scale_factor,
-                        c.crop_offset,
-                        Some(c.window_origin),
-                    )
-                })
-                .map_err(|e| format!("Window capture failed: {e}"))
-        } else {
-            capture::capture_screen_with_details(monitor, region.as_ref(), coords)
-                .map(|c| {
-                    (
-                        c.image,
-                        c.scale_factor,
-                        c.crop_offset,
-                        Some(c.monitor_origin),
-                    )
-                })
-                .map_err(|e| format!("Capture failed: {e}"))
+                    }],
+                    is_error: true,
+                };
+            }
+        };
+        let client_only = arguments
+            .get("clientOnly")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        capture::CaptureTarget::Window {
+            query: win_query,
+            client_only,
         }
+    } else {
+        capture::CaptureTarget::Monitor { index: monitor }
     };
 
-    let (image, scale_factor, crop_offset, monitor_origin) = if wait_change {
-        let mut baseline = match capture_once() {
-            Ok(c) => c,
+    let mut capture_once = || {
+        capture::capture_unified(target.clone(), region.as_ref(), coords)
+            .map_err(|e| format!("Capture failed: {e}"))
+    };
+
+    let captured = if wait_change {
+        match capture::wait_for_visual_change(
+            &mut capture_once,
+            diff_threshold,
+            std::time::Duration::from_millis(wait_timeout_ms),
+            std::time::Duration::from_millis(wait_interval_ms),
+        ) {
+            Ok((c, _)) => c,
             Err(err_msg) => {
                 return ToolCallResult {
                     content: vec![ToolContent::Text { text: err_msg }],
                     is_error: true,
                 };
             }
-        };
-
-        let start_time = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(wait_timeout_ms);
-        let interval = std::time::Duration::from_millis(wait_interval_ms.max(10));
-
-        while start_time.elapsed() < timeout {
-            std::thread::sleep(interval);
-            let next_captured = match capture_once() {
-                Ok(c) => c,
-                Err(err_msg) => {
-                    return ToolCallResult {
-                        content: vec![ToolContent::Text { text: err_msg }],
-                        is_error: true,
-                    };
-                }
-            };
-            let diff = output::calculate_image_diff(&next_captured.0, &baseline.0, diff_threshold);
-            if diff.changed && (diff.changed_pixels >= 50 || diff.changed_percent >= 0.05) {
-                baseline = next_captured;
-                break;
-            }
-            baseline = next_captured;
         }
-
-        baseline
     } else {
         match capture_once() {
             Ok(c) => c,
@@ -1018,6 +980,11 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
             }
         }
     };
+
+    let image = captured.image;
+    let scale_factor = captured.scale_factor;
+    let crop_offset = captured.crop_offset;
+    let monitor_origin = Some(captured.origin);
 
     // Action overlays: click ripples and drag trajectories
     let parsed_clicks =

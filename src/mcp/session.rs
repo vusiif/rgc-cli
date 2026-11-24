@@ -376,27 +376,16 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
     };
 
     // Step 1: Capture current screen target
-    let captured = if let Some(win) = window_query {
-        capture::capture_window_with_details(win, None).map(|c| {
-            (
-                c.image,
-                c.scale_factor,
-                c.crop_offset,
-                Some(c.window_origin),
-            )
-        })
+    let target = if let Some(win) = window_query {
+        capture::CaptureTarget::Window {
+            query: win,
+            client_only: false,
+        }
     } else {
-        capture::capture_screen_with_details(monitor, None, CoordMode::Logical).map(|c| {
-            (
-                c.image,
-                c.scale_factor,
-                c.crop_offset,
-                Some(c.monitor_origin),
-            )
-        })
+        capture::CaptureTarget::Monitor { index: monitor }
     };
 
-    let (raw_image, scale_factor, crop_offset, monitor_origin) = match captured {
+    let c = match capture::capture_unified(target, None, CoordMode::Logical) {
         Ok(c) => c,
         Err(e) => {
             return ToolCallResult {
@@ -407,6 +396,11 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
             };
         }
     };
+
+    let raw_image = c.image;
+    let scale_factor = c.scale_factor;
+    let crop_offset = c.crop_offset;
+    let monitor_origin = Some(c.origin);
 
     // Step 2: Execute base image pipeline (scale, cursor, privacy masks)
     let pipeline_opts = PipelineOptions {

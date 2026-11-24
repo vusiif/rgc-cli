@@ -309,38 +309,22 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         som_max_elements: 50,
     };
 
+    let target = if all_monitors {
+        capture::CaptureTarget::AllMonitors
+    } else if let Some(win) = window_query {
+        capture::CaptureTarget::Window {
+            query: win,
+            client_only,
+        }
+    } else {
+        capture::CaptureTarget::Monitor { index: monitor }
+    };
+
     while start_time.elapsed() < target_duration {
         let frame_start = std::time::Instant::now();
-        let captured = if all_monitors {
-            capture::capture_all_monitors_with_details(None, CoordMode::Logical).map(|c| {
-                (
-                    c.image,
-                    c.scale_factor,
-                    c.crop_offset,
-                    Some(c.monitor_origin),
-                )
-            })
-        } else if let Some(win) = window_query {
-            capture::capture_window_with_options(win, None, client_only).map(|c| {
-                (
-                    c.image,
-                    c.scale_factor,
-                    c.crop_offset,
-                    Some(c.window_origin),
-                )
-            })
-        } else {
-            capture::capture_screen_with_details(monitor, None, CoordMode::Logical).map(|c| {
-                (
-                    c.image,
-                    c.scale_factor,
-                    c.crop_offset,
-                    Some(c.monitor_origin),
-                )
-            })
-        };
+        let captured = capture::capture_unified(target.clone(), None, CoordMode::Logical);
 
-        let (frame_img, scale_factor, crop_offset, origin) = match captured {
+        let c = match captured {
             Ok(c) => c,
             Err(e) => {
                 return ToolCallResult {
@@ -351,6 +335,11 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
                 };
             }
         };
+
+        let frame_img = c.image;
+        let scale_factor = c.scale_factor;
+        let crop_offset = c.crop_offset;
+        let origin = Some(c.origin);
 
         let mut rgba = frame_img.into_rgba8();
         let frame_img = match crate::pipeline::process_recording_frame(

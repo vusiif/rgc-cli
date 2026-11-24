@@ -75,57 +75,21 @@ fn main() -> ExitCode {
     }
 }
 
-struct RawCaptured {
-    image: image::DynamicImage,
-    scale_factor: f32,
-    crop_offset: (u32, u32),
-    monitor_origin: Option<(i32, i32)>,
-}
-
-fn capture_target(args: &Cli) -> Result<RawCaptured, ApiError> {
-    if args.all_monitors {
-        debug!(
-            "Initiating all-monitors panorama capture (region={:?}, coords={:?})",
-            args.region, args.coords
-        );
-        let captured =
-            capture::capture_all_monitors_with_details(args.region.as_ref(), args.coords)?;
-        Ok(RawCaptured {
-            image: captured.image,
-            scale_factor: captured.scale_factor,
-            crop_offset: captured.crop_offset,
-            monitor_origin: Some(captured.monitor_origin),
-        })
+fn capture_target(args: &Cli) -> Result<capture::UnifiedCaptured, ApiError> {
+    let target = if args.all_monitors {
+        capture::CaptureTarget::AllMonitors
     } else if let Some(ref win_query) = args.window {
-        debug!(
-            "Initiating window capture (query={:?}, region={:?}, client_only={})",
-            win_query, args.region, args.client_only
-        );
-        let captured = capture::capture_window_with_options(
-            win_query,
-            args.region.as_ref(),
-            args.client_only,
-        )?;
-        Ok(RawCaptured {
-            image: captured.image,
-            scale_factor: captured.scale_factor,
-            crop_offset: captured.crop_offset,
-            monitor_origin: Some(captured.window_origin),
-        })
+        capture::CaptureTarget::Window {
+            query: win_query,
+            client_only: args.client_only,
+        }
     } else {
-        debug!(
-            "Initiating monitor capture (monitor={:?}, region={:?}, coords={:?})",
-            args.monitor, args.region, args.coords
-        );
-        let captured =
-            capture::capture_screen_with_details(args.monitor, args.region.as_ref(), args.coords)?;
-        Ok(RawCaptured {
-            image: captured.image,
-            scale_factor: captured.scale_factor,
-            crop_offset: captured.crop_offset,
-            monitor_origin: Some(captured.monitor_origin),
-        })
-    }
+        capture::CaptureTarget::Monitor {
+            index: args.monitor,
+        }
+    };
+
+    capture::capture_unified(target, args.region.as_ref(), args.coords).map_err(Into::into)
 }
 
 fn run(mut args: Cli) -> Result<(), ApiError> {
@@ -383,11 +347,8 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
 
         (follow_up, Some((click_marker, verification)))
     } else if args.wait_change {
-        let mut baseline = capture_target(&args)?;
-        let start_time = std::time::Instant::now();
         let timeout = Duration::from_millis(args.wait_timeout);
         let interval = Duration::from_millis(args.wait_interval.max(10));
-        let mut detected_change = false;
 
         if !args.quiet && !args.json {
             if is_stdout {
@@ -403,27 +364,12 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
             }
         }
 
-        while start_time.elapsed() < timeout {
-            sleep(interval);
-            let next_captured = capture_target(&args)?;
-            let diff = output::calculate_image_diff(
-                &next_captured.image,
-                &baseline.image,
-                args.diff_threshold,
-            );
-            if diff.changed && (diff.changed_pixels >= 50 || diff.changed_percent >= 0.05) {
-                debug!(
-                    "Visual change detected after {:?}: {} pixels changed ({:.2}%)",
-                    start_time.elapsed(),
-                    diff.changed_pixels,
-                    diff.changed_percent
-                );
-                baseline = next_captured;
-                detected_change = true;
-                break;
-            }
-            baseline = next_captured;
-        }
+        let (captured, detected_change) = capture::wait_for_visual_change(
+            || capture_target(&args),
+            args.diff_threshold,
+            timeout,
+            interval,
+        )?;
 
         if !detected_change {
             debug!(
@@ -432,7 +378,7 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
             );
         }
 
-        (baseline, None)
+        (captured, None)
     } else {
         (capture_target(&args)?, None)
     };
@@ -555,7 +501,7 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
         raw_captured.image,
         raw_captured.scale_factor,
         raw_captured.crop_offset,
-        raw_captured.monitor_origin,
+        Some(raw_captured.origin),
         &pipeline_options,
     )?;
 
@@ -808,7 +754,7 @@ fn run_recording(
             &mut rgba,
             raw.scale_factor,
             raw.crop_offset,
-            raw.monitor_origin,
+            Some(raw.origin),
             &frame_options,
         )?;
         let rgba = frame_img.into_rgba8();
