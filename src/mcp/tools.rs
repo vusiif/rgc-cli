@@ -949,9 +949,15 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         capture::CaptureTarget::Monitor { index: monitor }
     };
 
+    let err_prefix = match target {
+        capture::CaptureTarget::AllMonitors => "Panorama capture failed",
+        capture::CaptureTarget::Window { .. } => "Window capture failed",
+        capture::CaptureTarget::Monitor { .. } => "Capture failed",
+    };
+
     let mut capture_once = || {
         capture::capture_unified(target.clone(), region.as_ref(), coords)
-            .map_err(|e| format!("Capture failed: {e}"))
+            .map_err(|e| format!("{err_prefix}: {e}"))
     };
 
     let captured = if wait_change {
