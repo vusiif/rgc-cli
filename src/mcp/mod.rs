@@ -348,6 +348,45 @@ pub fn handle_mcp_message(line: &str) -> Option<String> {
     }
 }
 
+/// Reads a line from `reader` up to `max_bytes`, returning the number of bytes read.
+/// Returns an error if the line length exceeds `max_bytes` without a newline, preventing unbounded memory allocation.
+pub fn read_bounded_line<R: std::io::BufRead>(
+    reader: &mut R,
+    buf: &mut String,
+    max_bytes: usize,
+) -> std::io::Result<usize> {
+    buf.clear();
+    let mut total_read = 0;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(total_read);
+        }
+
+        let (newline_found, consumed) = match available.iter().position(|&b| b == b'\n') {
+            Some(pos) => (true, pos + 1),
+            None => (false, available.len()),
+        };
+
+        if total_read + consumed > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("MCP request line exceeded maximum allowed length of {max_bytes} bytes"),
+            ));
+        }
+
+        let slice = std::str::from_utf8(&available[..consumed])
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        buf.push_str(slice);
+        reader.consume(consumed);
+        total_read += consumed;
+
+        if newline_found {
+            return Ok(total_read);
+        }
+    }
+}
+
 /// Run Model Context Protocol (MCP) server loop over standard I/O streams.
 pub fn run_mcp_loop(reader: impl BufRead, writer: impl Write + Send) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -398,9 +437,9 @@ pub fn run_mcp_loop(reader: impl BufRead, writer: impl Write + Send) -> std::io:
 
         let mut reader = reader;
         let mut line_buf = String::with_capacity(4096);
+        const MAX_MCP_REQUEST_BYTES: usize = 16 * 1024 * 1024; // 16 MB max line length
         loop {
-            line_buf.clear();
-            match reader.read_line(&mut line_buf) {
+            match read_bounded_line(&mut reader, &mut line_buf, MAX_MCP_REQUEST_BYTES) {
                 Ok(0) => break,
                 Ok(_) => {
                     let line = line_buf.trim();
@@ -973,5 +1012,28 @@ mod tests {
             load_untrusted_image_input(&b64, "template").expect("valid base64 should decode");
         assert_eq!(loaded.width(), 4);
         assert_eq!(loaded.height(), 4);
+    }
+
+    #[test]
+    fn test_read_bounded_line_normal_and_exceed_limit() {
+        let data = b"hello world\nsecond line\n";
+        let mut cursor = std::io::Cursor::new(data);
+        let mut buf = String::new();
+
+        let n1 = read_bounded_line(&mut cursor, &mut buf, 64).unwrap();
+        assert_eq!(n1, 12);
+        assert_eq!(buf, "hello world\n");
+
+        let n2 = read_bounded_line(&mut cursor, &mut buf, 64).unwrap();
+        assert_eq!(n2, 12);
+        assert_eq!(buf, "second line\n");
+
+        // Exceed limit test
+        let mut cursor_big =
+            std::io::Cursor::new(b"this line is definitely longer than ten bytes\n");
+        let mut buf_big = String::new();
+        let err = read_bounded_line(&mut cursor_big, &mut buf_big, 10).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceeded maximum allowed length"));
     }
 }

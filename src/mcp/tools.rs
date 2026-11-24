@@ -375,47 +375,53 @@ pub fn validate_mcp_output_path(
         }
     }
 
-    // Allowed directories check (if RGC_ALLOWED_OUTPUT_DIRS environment variable is set)
+    // Allowed directories check (from active config and RGC_ALLOWED_OUTPUT_DIRS environment variable)
+    let active_cfg = crate::config::get_active_config();
+    let mut configured_allowed: Vec<String> = active_cfg.security.allowed_output_dirs.clone();
     if let Ok(allowed_dirs_var) = std::env::var("RGC_ALLOWED_OUTPUT_DIRS") {
-        let trimmed_var = allowed_dirs_var.trim();
-        if !trimmed_var.is_empty() {
-            let allowed_dirs: Vec<PathBuf> = trimmed_var
-                .split([',', ';'])
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-                .filter_map(|pb| pb.canonicalize().ok())
-                .collect();
-
-            if allowed_dirs.is_empty() {
-                return Err(format!(
-                    "RGC_ALLOWED_OUTPUT_DIRS is configured ('{allowed_dirs_var}') but contains no valid or accessible directories; refusing file write for security."
-                ));
+        for part in allowed_dirs_var.split([',', ';']) {
+            let t = part.trim();
+            if !t.is_empty() {
+                configured_allowed.push(t.to_string());
             }
+        }
+    }
 
-            let abs_path = if p.is_relative() {
-                std::env::current_dir()
-                    .map(|cwd| cwd.join(p))
-                    .unwrap_or_else(|_| p.to_path_buf())
-            } else {
-                p.to_path_buf()
-            };
+    if !configured_allowed.is_empty() {
+        let allowed_dirs: Vec<PathBuf> = configured_allowed
+            .iter()
+            .map(PathBuf::from)
+            .filter_map(|pb| pb.canonicalize().ok())
+            .collect();
 
-            let parent_to_check = abs_path
-                .parent()
-                .and_then(|parent| parent.canonicalize().ok())
-                .unwrap_or_else(|| abs_path.clone());
+        if allowed_dirs.is_empty() {
+            return Err(format!(
+                "Allowed output directories configured ({configured_allowed:?}) but none are valid or accessible; refusing file write for security."
+            ));
+        }
 
-            let is_allowed = allowed_dirs
-                .iter()
-                .any(|allowed| parent_to_check.starts_with(allowed));
+        let abs_path = if p.is_relative() {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(p))
+                .unwrap_or_else(|_| p.to_path_buf())
+        } else {
+            p.to_path_buf()
+        };
 
-            if !is_allowed {
-                return Err(format!(
-                    "Target outputPath '{}' is outside allowed directories: {:?}",
-                    trimmed, allowed_dirs_var
-                ));
-            }
+        let parent_to_check = abs_path
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .unwrap_or_else(|| abs_path.clone());
+
+        let is_allowed = allowed_dirs
+            .iter()
+            .any(|allowed| parent_to_check.starts_with(allowed));
+
+        if !is_allowed {
+            return Err(format!(
+                "Target outputPath '{}' is outside allowed directories: {:?}",
+                trimmed, configured_allowed
+            ));
         }
     }
 
@@ -1238,7 +1244,40 @@ pub fn execute_find_template_tool(arguments: &serde_json::Value) -> ToolCallResu
     };
 
     let (image, scale_factor, crop_offset, origin) = captured;
-    let rgba = image.into_rgba8();
+
+    // Apply active PrivacyPolicy so templates cannot match on or leak masked/sensitive content
+    let cfg = crate::config::get_active_config();
+    let privacy_policy = crate::config::PrivacyPolicy::from_config(&cfg.privacy);
+    let pipeline_opts = crate::pipeline::PipelineOptions {
+        manual_masks: privacy_policy.mask_regions,
+        mask_windows: privacy_policy.mask_windows,
+        exclude_windows: privacy_policy.exclude_windows,
+        allow_missing_mask: privacy_policy.allow_missing_mask,
+        coords_mode: CoordMode::Physical,
+        ..Default::default()
+    };
+    let sanitized_res = match crate::pipeline::execute_image_pipeline(
+        image,
+        scale_factor,
+        crop_offset,
+        Some(origin),
+        &pipeline_opts,
+    ) {
+        Ok(res) => res,
+        Err(e) => {
+            return ToolCallResult {
+                content: vec![ToolContent::Text {
+                    text: format!(
+                        "Privacy redaction failed during template search: {}",
+                        e.message
+                    ),
+                }],
+                is_error: true,
+            };
+        }
+    };
+
+    let rgba = sanitized_res.image.into_rgba8();
     let img_w = rgba.width();
     let img_h = rgba.height();
 

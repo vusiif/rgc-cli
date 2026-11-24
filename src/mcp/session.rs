@@ -28,11 +28,15 @@ pub const SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 /// Maximum concurrent active visual sessions retained in memory.
 pub const MAX_CONCURRENT_SESSIONS: usize = 16;
 
+/// Maximum aggregate uncompressed cache size across all active visual sessions (256 MiB).
+pub const MAX_SESSION_CACHE_BYTES: usize = 256 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct SessionRecord {
-    pub last_image: DynamicImage,
+    pub last_image: Arc<DynamicImage>,
     pub frame_index: u64,
     pub last_accessed: Instant,
+    pub target_fingerprint: String,
 }
 
 #[derive(Clone, Default)]
@@ -58,11 +62,17 @@ impl SessionManager {
         map.retain(|_, record| now.saturating_duration_since(record.last_accessed) < SESSION_TTL);
     }
 
-    /// Prune expired sessions older than TTL and evict oldest if capacity exceeded.
+    fn total_cache_bytes(map: &HashMap<String, SessionRecord>) -> usize {
+        map.values().map(|r| r.last_image.as_bytes().len()).sum()
+    }
+
+    /// Prune expired sessions older than TTL and evict oldest if capacity or memory budget exceeded.
     pub fn cleanup(&self) {
         if let Ok(mut map) = self.sessions.lock() {
             Self::prune_expired(&mut map);
-            while map.len() > MAX_CONCURRENT_SESSIONS {
+            while map.len() > MAX_CONCURRENT_SESSIONS
+                || Self::total_cache_bytes(&map) > MAX_SESSION_CACHE_BYTES
+            {
                 if let Some(oldest_key) = map
                     .iter()
                     .min_by_key(|(_, r)| r.last_accessed)
@@ -87,17 +97,35 @@ impl SessionManager {
         }
     }
 
+    /// Update session baseline with standard `DynamicImage` (backward compatibility).
     pub fn update(&self, session_id: String, image: DynamicImage, frame_index: u64) {
+        self.update_with_target(session_id, Arc::new(image), frame_index, String::new());
+    }
+
+    /// Update session baseline with `Arc<DynamicImage>` and explicit capture target fingerprint.
+    pub fn update_with_target(
+        &self,
+        session_id: String,
+        image: Arc<DynamicImage>,
+        frame_index: u64,
+        target_fingerprint: String,
+    ) {
         if let Ok(mut map) = self.sessions.lock() {
             Self::prune_expired(&mut map);
-            // If capacity is reached and inserting a brand new session, evict the LRU session
-            if !map.contains_key(&session_id) && map.len() >= MAX_CONCURRENT_SESSIONS {
+            let img_bytes = image.as_bytes().len();
+            // Evict if capacity or memory limit is exceeded
+            while (!map.contains_key(&session_id) && map.len() >= MAX_CONCURRENT_SESSIONS)
+                || (Self::total_cache_bytes(&map) + img_bytes > MAX_SESSION_CACHE_BYTES
+                    && !map.is_empty())
+            {
                 if let Some(oldest_key) = map
                     .iter()
                     .min_by_key(|(_, r)| r.last_accessed)
                     .map(|(k, _)| k.clone())
                 {
                     map.remove(&oldest_key);
+                } else {
+                    break;
                 }
             }
             map.insert(
@@ -106,6 +134,7 @@ impl SessionManager {
                     last_image: image,
                     frame_index,
                     last_accessed: Instant::now(),
+                    target_fingerprint,
                 },
             );
         }
@@ -385,7 +414,7 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         capture::CaptureTarget::Monitor { index: monitor }
     };
 
-    let c = match capture::capture_unified(target, None, CoordMode::Logical) {
+    let c = match capture::capture_unified(target.clone(), None, CoordMode::Logical) {
         Ok(c) => c,
         Err(e) => {
             return ToolCallResult {
@@ -441,7 +470,21 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         manager.reset(&session_id);
     }
 
-    let prior_session = manager.get(&session_id);
+    let target_fingerprint = format!("{:?}:scale={:?}:max_dim={:?}", target, scale, max_dimension);
+
+    let prior_session = manager.get(&session_id).and_then(|rec| {
+        if !rec.target_fingerprint.is_empty() && rec.target_fingerprint != target_fingerprint {
+            log::debug!(
+                "Session '{}' target context changed from '{}' to '{}'. Resetting baseline.",
+                session_id,
+                rec.target_fingerprint,
+                target_fingerprint
+            );
+            None
+        } else {
+            Some(rec)
+        }
+    });
 
     let (
         is_first_frame,
@@ -452,27 +495,27 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         bbox,
         output_img,
         diff_crop_offset,
+        is_diff_cropped,
+        pending_baseline_image,
     ) = match prior_session {
-        None => {
-            // First frame of session: establish baseline
-            manager.update(session_id.clone(), current_img.clone(), 1);
-            (
-                true,
-                1u64,
-                false,
-                0u64,
-                0.0f64,
-                None,
-                current_img,
-                (0u32, 0u32),
-            )
-        }
+        None => (
+            true,
+            1u64,
+            false,
+            0u64,
+            0.0f64,
+            None,
+            current_img.clone(),
+            (0u32, 0u32),
+            false,
+            Arc::new(current_img),
+        ),
         Some(record) => {
             let diff = output::calculate_image_diff(&current_img, &record.last_image, threshold);
             let next_frame_idx = record.frame_index + 1;
 
             if diff.changed && (diff.changed_pixels >= 50 || diff.changed_percent >= 0.05) {
-                let (out_img, crop_off) = if diff_only {
+                let (out_img, crop_off, is_cropped) = if diff_only {
                     if let Some(ref b) = diff.bbox {
                         let padding = 8u32;
                         let px = b.x.saturating_sub(padding);
@@ -480,15 +523,15 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
                         (
                             output::crop_to_diff_bbox(current_img.clone(), b, padding),
                             (px, py),
+                            true,
                         )
                     } else {
-                        (current_img.clone(), (0, 0))
+                        (current_img.clone(), (0, 0), false)
                     }
                 } else {
-                    (current_img.clone(), (0, 0))
+                    (current_img.clone(), (0, 0), false)
                 };
 
-                manager.update(session_id.clone(), current_img, next_frame_idx);
                 (
                     false,
                     next_frame_idx,
@@ -498,10 +541,11 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
                     diff.bbox,
                     out_img,
                     crop_off,
+                    is_cropped,
+                    Arc::new(current_img),
                 )
             } else {
                 // No visual change: update access time, return unchanged notice without heavy image
-                manager.update(session_id.clone(), record.last_image, next_frame_idx);
                 (
                     false,
                     next_frame_idx,
@@ -511,12 +555,14 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
                     None,
                     current_img,
                     (0u32, 0u32),
+                    false,
+                    Arc::clone(&record.last_image),
                 )
             }
         }
     };
 
-    let final_transform = if diff_crop_offset != (0, 0) {
+    let final_transform = if is_diff_cropped {
         crate::coords::CoordinateTransform::new(
             pipeline_res.transform.screen_origin,
             pipeline_res.transform.screen_scale_factor,
@@ -536,7 +582,7 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
     let mut content = Vec::new();
 
     let response_json = SessionResponseJson {
-        session_id,
+        session_id: session_id.clone(),
         frame_index,
         is_first_frame,
         changed,
@@ -554,7 +600,47 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         });
     }
 
-    if let Some(ref elems) = pipeline_res.elements {
+    let remapped_elements: Option<Vec<crate::api::UiElement>> =
+        pipeline_res.elements.map(|elems| {
+            if is_diff_cropped {
+                let crop_x = diff_crop_offset.0;
+                let crop_y = diff_crop_offset.1;
+                let crop_w = output_img.width();
+                let crop_h = output_img.height();
+
+                elems
+                    .into_iter()
+                    .filter_map(|mut el| {
+                        let ex2 = el.x.saturating_add(el.width);
+                        let ey2 = el.y.saturating_add(el.height);
+                        let cx2 = crop_x.saturating_add(crop_w);
+                        let cy2 = crop_y.saturating_add(crop_h);
+
+                        // Exclude elements completely outside the cropped bounding box
+                        if ex2 <= crop_x || el.x >= cx2 || ey2 <= crop_y || el.y >= cy2 {
+                            return None;
+                        }
+
+                        let new_x1 = el.x.max(crop_x);
+                        let new_y1 = el.y.max(crop_y);
+                        let new_x2 = ex2.min(cx2);
+                        let new_y2 = ey2.min(cy2);
+
+                        el.x = new_x1.saturating_sub(crop_x);
+                        el.y = new_y1.saturating_sub(crop_y);
+                        el.width = new_x2.saturating_sub(new_x1);
+                        el.height = new_y2.saturating_sub(new_y1);
+                        el.center_x = el.x + el.width / 2;
+                        el.center_y = el.y + el.height / 2;
+                        Some(el)
+                    })
+                    .collect()
+            } else {
+                elems
+            }
+        });
+
+    if let Some(ref elems) = remapped_elements {
         if let Ok(elems_json) = serde_json::to_string_pretty(elems) {
             content.push(ToolContent::Text {
                 text: format!("Detected UI Elements:\n{elems_json}"),
@@ -586,19 +672,37 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
 
     // Attach base64 image: on first frame, or on visual changes, or when diffOnly is false
     if is_first_frame || changed || !diff_only {
-        if let Ok(bytes) = output::encode_image_bytes(&output_img, format, None) {
-            let b64 = base64_encode(&bytes);
-            let mime_type = match format {
-                crate::cli::ImageFormat::Webp => "image/webp",
-                crate::cli::ImageFormat::Jpeg => "image/jpeg",
-                _ => "image/png",
-            };
-            content.push(ToolContent::Image {
-                data: b64,
-                mime_type: mime_type.to_string(),
-            });
+        match output::encode_image_bytes(&output_img, format, None) {
+            Ok(bytes) => {
+                let b64 = base64_encode(&bytes);
+                let mime_type = match format {
+                    crate::cli::ImageFormat::Webp => "image/webp",
+                    crate::cli::ImageFormat::Jpeg => "image/jpeg",
+                    _ => "image/png",
+                };
+                content.push(ToolContent::Image {
+                    data: b64,
+                    mime_type: mime_type.to_string(),
+                });
+            }
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Failed to encode session image: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
         }
     }
+
+    // COMMIT TRANSACTION: Both disk save and image encode succeeded, commit baseline update to session manager
+    manager.update_with_target(
+        session_id.clone(),
+        pending_baseline_image,
+        frame_index,
+        target_fingerprint,
+    );
 
     ToolCallResult {
         content,
@@ -732,5 +836,25 @@ mod tests {
         // Screen point (500, 300) must map to (8, 8) in the cropped image
         assert_eq!(final_transform.screen_to_image(500, 300), (8, 8));
         assert_eq!(final_transform.image_to_screen(8, 8), (500, 300));
+    }
+
+    #[test]
+    fn test_session_target_fingerprint_reset() {
+        let manager = SessionManager::new();
+        let img = Arc::new(DynamicImage::new_rgba8(50, 50));
+
+        manager.update_with_target(
+            "session-t1".to_string(),
+            img.clone(),
+            1,
+            "Target::Window('Calc'):scale=None:max_dim=None".to_string(),
+        );
+
+        let rec = manager.get("session-t1").expect("Session exists");
+        assert_eq!(rec.frame_index, 1);
+        assert_eq!(
+            rec.target_fingerprint,
+            "Target::Window('Calc'):scale=None:max_dim=None"
+        );
     }
 }

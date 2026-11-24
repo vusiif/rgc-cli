@@ -94,7 +94,18 @@ fn capture_target(args: &Cli) -> Result<capture::UnifiedCaptured, ApiError> {
 
 fn run(mut args: Cli) -> Result<(), ApiError> {
     // Load configuration file if present
-    if let Some(cfg) = config::RgcConfig::load(args.config.as_deref()) {
+    if let Some(ref config_path) = args.config {
+        let cfg = config::RgcConfig::load_explicit(config_path).map_err(|e| {
+            ApiError::new(ErrorCode::BadArgs, e)
+                .with_stage("config_load")
+                .with_suggestion(
+                    "Verify that the path passed to --config exists and contains valid TOML.",
+                )
+        })?;
+        config::set_active_config(cfg.clone());
+        apply_config_to_cli(&mut args, &cfg);
+    } else if let Some(cfg) = config::RgcConfig::load(None) {
+        config::set_active_config(cfg.clone());
         apply_config_to_cli(&mut args, &cfg);
     }
 
@@ -922,6 +933,30 @@ pub struct WatchEventJson {
     pub timestamp: String,
 }
 
+fn capture_and_sanitize_target(args: &Cli) -> Result<image::DynamicImage, ApiError> {
+    let captured = capture_target(args)?;
+    let pipeline_options = pipeline::PipelineOptions {
+        cursor: args.cursor,
+        highlight_cursor: args.highlight_cursor,
+        manual_masks: args.mask.clone(),
+        mask_windows: args.mask_window.clone(),
+        exclude_windows: args.exclude_window.clone(),
+        allow_missing_mask: args.allow_missing_mask,
+        coords_mode: args.coords,
+        scale: args.scale,
+        max_dimension: args.max_dimension,
+        ..Default::default()
+    };
+    let res = pipeline::execute_image_pipeline(
+        captured.image,
+        captured.scale_factor,
+        captured.crop_offset,
+        Some(captured.origin),
+        &pipeline_options,
+    )?;
+    Ok(res.image)
+}
+
 fn run_watch_mode(
     args: &Cli,
     interval_ms: u64,
@@ -940,7 +975,7 @@ fn run_watch_mode(
         );
     }
 
-    let mut baseline = capture_target(args)?;
+    let mut baseline = capture_and_sanitize_target(args)?;
     let mut event_count = 0u32;
     let format = output::validate_and_infer_format(&destination, args.format)?;
 
@@ -956,9 +991,8 @@ fn run_watch_mode(
 
         sleep(interval);
 
-        let current = capture_target(args)?;
-        let diff =
-            output::calculate_image_diff(&current.image, &baseline.image, args.watch_threshold);
+        let current = capture_and_sanitize_target(args)?;
+        let diff = output::calculate_image_diff(&current, &baseline, args.watch_threshold);
 
         if diff.changed && diff.changed_percent >= args.watch_min_percent {
             event_count += 1;
@@ -976,12 +1010,12 @@ fn run_watch_mode(
                     );
                     let out_path = dir.join(filename);
                     let dest = OutputDestination::File(out_path.clone());
-                    output::save_image(&current.image, &dest, format, args.quality)?;
+                    output::save_image(&current, &dest, format, args.quality)?;
                     Some(out_path.display().to_string())
                 }
-                OutputDestination::File(f) => {
-                    output::save_image(&current.image, &destination, format, args.quality)?;
-                    Some(f.display().to_string())
+                OutputDestination::File(p) => {
+                    output::save_image(&current, &destination, format, args.quality)?;
+                    Some(p.display().to_string())
                 }
                 _ => None,
             };

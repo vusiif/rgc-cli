@@ -39,6 +39,9 @@ pub struct PrivacyConfig {
     /// Whether to allow capture if a configured mask window is not found.
     #[serde(default)]
     pub allow_missing_mask: Option<bool>,
+    /// Enforce mandatory privacy mode: when true, requests cannot weaken or bypass masking rules.
+    #[serde(default)]
+    pub strict: Option<bool>,
 }
 
 /// Security and directory constraints.
@@ -81,13 +84,48 @@ pub struct PrivacyPolicy {
 }
 
 impl PrivacyPolicy {
+    /// Create a PrivacyPolicy directly from a configuration.
+    pub fn from_config(cfg: &PrivacyConfig) -> Self {
+        Self::from_config_and_request(cfg, &[], &[], &[], None)
+    }
+
+    /// Validate that all configured mask rules and regions parse successfully.
+    pub fn try_from_config(cfg: &PrivacyConfig) -> Result<Self, String> {
+        let mut mask_windows = Vec::new();
+        for w in &cfg.mask_windows {
+            let mw = w
+                .parse::<crate::cli::MaskWindow>()
+                .map_err(|e| format!("Invalid mask_windows entry '{w}': {e}"))?;
+            mask_windows.push(mw);
+        }
+
+        let mut mask_regions = Vec::new();
+        for r in &cfg.mask_regions {
+            let mr = r
+                .parse::<crate::cli::MaskRegion>()
+                .map_err(|e| format!("Invalid mask_regions entry '{r}': {e}"))?;
+            mask_regions.push(mr);
+        }
+
+        let allow_missing_mask = cfg.allow_missing_mask.unwrap_or(false);
+
+        Ok(Self {
+            mask_windows,
+            exclude_windows: cfg.exclude_windows.clone(),
+            mask_regions,
+            allow_missing_mask,
+        })
+    }
+
     /// Merge global configuration with request-level options.
     ///
     /// Rules:
     /// - Configured `mask_windows` are parsed and retained; request-level masks are appended (union).
     /// - Configured `exclude_windows` are retained; request-level excludes are appended (union without duplicates).
     /// - Configured `mask_regions` are parsed and retained; request-level regions are appended.
-    /// - `allow_missing_mask`: request-level override takes effect if Some; otherwise defaults to configured value, or false.
+    /// - `allow_missing_mask`:
+    ///   - If globally configured as `Some(false)` (strict enforcement), requests CANNOT weaken or disable it.
+    ///   - If globally configured as `Some(true)` or `None`, requests can tighten it by requesting `Some(false)`.
     pub fn from_config_and_request(
         cfg: &PrivacyConfig,
         request_mask_windows: &[crate::cli::MaskWindow],
@@ -97,8 +135,9 @@ impl PrivacyPolicy {
     ) -> Self {
         let mut mask_windows = Vec::new();
         for w in &cfg.mask_windows {
-            if let Ok(mw) = w.parse::<crate::cli::MaskWindow>() {
-                mask_windows.push(mw);
+            match w.parse::<crate::cli::MaskWindow>() {
+                Ok(mw) => mask_windows.push(mw),
+                Err(e) => log::warn!("Skipping invalid configured mask_windows '{w}': {e}"),
             }
         }
         for rm in request_mask_windows {
@@ -119,15 +158,21 @@ impl PrivacyPolicy {
 
         let mut mask_regions = Vec::new();
         for r in &cfg.mask_regions {
-            if let Ok(mr) = r.parse::<crate::cli::MaskRegion>() {
-                mask_regions.push(mr);
+            match r.parse::<crate::cli::MaskRegion>() {
+                Ok(mr) => mask_regions.push(mr),
+                Err(e) => log::warn!("Skipping invalid configured mask_regions '{r}': {e}"),
             }
         }
         mask_regions.extend_from_slice(request_mask_regions);
 
-        let allow_missing_mask = request_allow_missing
-            .or(cfg.allow_missing_mask)
-            .unwrap_or(false);
+        let allow_missing_mask = if cfg.strict == Some(true) {
+            // Mandatory privacy enforcement: requests cannot weaken or bypass strict mask requirements.
+            false
+        } else {
+            request_allow_missing
+                .or(cfg.allow_missing_mask)
+                .unwrap_or(false)
+        };
 
         Self {
             mask_windows,
@@ -138,8 +183,22 @@ impl PrivacyPolicy {
     }
 }
 
+static ACTIVE_CONFIG: std::sync::RwLock<Option<RgcConfig>> = std::sync::RwLock::new(None);
+
+/// Set the active global configuration.
+pub fn set_active_config(config: RgcConfig) {
+    if let Ok(mut lock) = ACTIVE_CONFIG.write() {
+        *lock = Some(config);
+    }
+}
+
 /// Retrieve the active global configuration or default.
 pub fn get_active_config() -> RgcConfig {
+    if let Ok(lock) = ACTIVE_CONFIG.read() {
+        if let Some(ref cfg) = *lock {
+            return cfg.clone();
+        }
+    }
     RgcConfig::load(None).unwrap_or_default()
 }
 
@@ -149,29 +208,44 @@ impl RgcConfig {
         toml::from_str(content)
     }
 
+    /// Explicitly load and validate configuration from a given file path.
+    /// Returns an error if the file does not exist, cannot be read, or contains invalid syntax/rules.
+    pub fn load_explicit(path: &Path) -> Result<Self, String> {
+        if !path.exists() {
+            return Err(format!(
+                "Configuration file does not exist: {}",
+                path.display()
+            ));
+        }
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read config file '{}': {e}", path.display()))?;
+        let cfg = Self::from_toml(&content).map_err(|e| {
+            format!(
+                "Failed to parse TOML in config file '{}': {e}",
+                path.display()
+            )
+        })?;
+        PrivacyPolicy::try_from_config(&cfg.privacy)
+            .map_err(|e| format!("Invalid privacy configuration in '{}': {e}", path.display()))?;
+        Ok(cfg)
+    }
+
     /// Load configuration from an explicit path or search standard candidate locations.
     pub fn load(explicit_path: Option<&Path>) -> Option<Self> {
         if let Some(path) = explicit_path {
-            if path.exists() {
-                match fs::read_to_string(path) {
-                    Ok(content) => match Self::from_toml(&content) {
-                        Ok(cfg) => {
-                            debug!(
-                                "Loaded configuration from explicit path: {}",
-                                path.display()
-                            );
-                            return Some(cfg);
-                        }
-                        Err(e) => {
-                            debug!("Failed to parse config at '{}': {e}", path.display());
-                        }
-                    },
-                    Err(e) => {
-                        debug!("Failed to read config file '{}': {e}", path.display());
-                    }
+            match Self::load_explicit(path) {
+                Ok(cfg) => {
+                    debug!(
+                        "Loaded configuration from explicit path: {}",
+                        path.display()
+                    );
+                    return Some(cfg);
+                }
+                Err(e) => {
+                    debug!("{e}");
+                    return None;
                 }
             }
-            return None;
         }
 
         // Search candidate locations
@@ -284,6 +358,7 @@ coords = "physical"
             exclude_windows: vec!["Terminal".to_string()],
             mask_regions: vec!["0,0,100,50:blur".to_string()],
             allow_missing_mask: Some(false),
+            strict: None,
         };
 
         let req_mask_win = vec![crate::cli::MaskWindow {
@@ -337,5 +412,50 @@ coords = "physical"
         let policy_override =
             PrivacyPolicy::from_config_and_request(&cfg, &[], &[], &[], Some(true));
         assert!(policy_override.allow_missing_mask);
+    }
+
+    #[test]
+    fn test_privacy_policy_strict_mode_cannot_be_downgraded() {
+        let cfg = PrivacyConfig {
+            mask_windows: vec!["1Password".to_string()],
+            exclude_windows: vec![],
+            mask_regions: vec![],
+            allow_missing_mask: Some(true),
+            strict: Some(true),
+        };
+
+        // When strict: true is configured, requests cannot bypass or allow missing masks
+        let policy = PrivacyPolicy::from_config_and_request(&cfg, &[], &[], &[], Some(true));
+        assert!(!policy.allow_missing_mask);
+    }
+
+    #[test]
+    fn test_try_from_config_validation() {
+        let valid_cfg = PrivacyConfig {
+            mask_windows: vec!["Pass:blackout".to_string()],
+            exclude_windows: vec!["Term".to_string()],
+            mask_regions: vec!["0,0,10,10:blur".to_string()],
+            allow_missing_mask: None,
+            strict: None,
+        };
+        assert!(PrivacyPolicy::try_from_config(&valid_cfg).is_ok());
+
+        let invalid_mask_cfg = PrivacyConfig {
+            mask_windows: vec![":blur".to_string()],
+            exclude_windows: vec![],
+            mask_regions: vec![],
+            allow_missing_mask: None,
+            strict: None,
+        };
+        assert!(PrivacyPolicy::try_from_config(&invalid_mask_cfg).is_err());
+
+        let invalid_region_cfg = PrivacyConfig {
+            mask_windows: vec![],
+            exclude_windows: vec![],
+            mask_regions: vec!["invalid_coords".to_string()],
+            allow_missing_mask: None,
+            strict: None,
+        };
+        assert!(PrivacyPolicy::try_from_config(&invalid_region_cfg).is_err());
     }
 }

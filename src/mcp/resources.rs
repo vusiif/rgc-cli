@@ -78,22 +78,60 @@ pub fn image_to_blob_resource(
     })
 }
 
+fn capture_and_sanitize_resource(
+    target: capture::CaptureTarget,
+    context: &str,
+) -> Result<image::DynamicImage, JsonRpcError> {
+    let captured =
+        capture::capture_unified(target, None, CoordMode::Logical).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to capture {context}: {e}"),
+            data: None,
+        })?;
+
+    let cfg = crate::config::get_active_config();
+    let privacy_policy = crate::config::PrivacyPolicy::from_config(&cfg.privacy);
+
+    let pipeline_opts = crate::pipeline::PipelineOptions {
+        manual_masks: privacy_policy.mask_regions,
+        mask_windows: privacy_policy.mask_windows,
+        exclude_windows: privacy_policy.exclude_windows,
+        allow_missing_mask: privacy_policy.allow_missing_mask,
+        coords_mode: CoordMode::Logical,
+        ..Default::default()
+    };
+
+    let res = crate::pipeline::execute_image_pipeline(
+        captured.image,
+        captured.scale_factor,
+        captured.crop_offset,
+        Some(captured.origin),
+        &pipeline_opts,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!(
+            "Privacy redaction failed on resource '{context}': {}",
+            e.message
+        ),
+        data: None,
+    })?;
+
+    Ok(res.image)
+}
+
 pub fn read_resource(uri: &str) -> Result<ResourceReadResult, JsonRpcError> {
     if uri == "screen://current" || uri == "screen://primary" {
-        let image =
-            capture::capture_screen(None, None, CoordMode::Logical).map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Failed to capture current screen for '{uri}': {e}"),
-                data: None,
-            })?;
+        let image = capture_and_sanitize_resource(
+            capture::CaptureTarget::Monitor { index: None },
+            &format!("current screen for '{uri}'"),
+        )?;
         image_to_blob_resource(uri, &image)
     } else if uri == "screen://all" || uri == "screen://panorama" {
-        let image =
-            capture::capture_all_monitors(None, CoordMode::Logical).map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Failed to capture all monitors panorama for '{uri}': {e}"),
-                data: None,
-            })?;
+        let image = capture_and_sanitize_resource(
+            capture::CaptureTarget::AllMonitors,
+            &format!("all monitors panorama for '{uri}'"),
+        )?;
         image_to_blob_resource(uri, &image)
     } else if let Some(idx_str) = uri.strip_prefix("screen://monitor/") {
         let monitor_idx: usize = idx_str.trim().parse().map_err(|_| JsonRpcError {
@@ -101,21 +139,21 @@ pub fn read_resource(uri: &str) -> Result<ResourceReadResult, JsonRpcError> {
             message: format!("Invalid monitor index '{idx_str}' in URI '{uri}'"),
             data: None,
         })?;
-        let image =
-            capture::capture_screen(Some(monitor_idx), None, CoordMode::Logical).map_err(|e| {
-                JsonRpcError {
-                    code: -32000,
-                    message: format!("Failed to capture monitor #{monitor_idx} for '{uri}': {e}"),
-                    data: None,
-                }
-            })?;
+        let image = capture_and_sanitize_resource(
+            capture::CaptureTarget::Monitor {
+                index: Some(monitor_idx),
+            },
+            &format!("monitor #{monitor_idx} for '{uri}'"),
+        )?;
         image_to_blob_resource(uri, &image)
     } else if let Some(win_id_str) = uri.strip_prefix("screen://window/") {
-        let image = capture::capture_window(win_id_str).map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Failed to capture window for '{uri}': {e}"),
-            data: None,
-        })?;
+        let image = capture_and_sanitize_resource(
+            capture::CaptureTarget::Window {
+                query: win_id_str,
+                client_only: false,
+            },
+            &format!("window for '{uri}'"),
+        )?;
         image_to_blob_resource(uri, &image)
     } else if uri == "screen://diagnostics" || uri == "screen://doctor" {
         let report = doctor::run_doctor();
@@ -156,21 +194,32 @@ pub fn compute_resource_fingerprint(uri: &str) -> Option<u64> {
     }
 
     if uri == "screen://current" || uri == "screen://primary" {
-        if let Ok(img) = capture::capture_screen(None, None, CoordMode::Logical) {
+        if let Ok(img) =
+            capture_and_sanitize_resource(capture::CaptureTarget::Monitor { index: None }, uri)
+        {
             return Some(hash_image_sample(&img));
         }
     } else if uri == "screen://all" || uri == "screen://panorama" {
-        if let Ok(img) = capture::capture_all_monitors(None, CoordMode::Logical) {
+        if let Ok(img) = capture_and_sanitize_resource(capture::CaptureTarget::AllMonitors, uri) {
             return Some(hash_image_sample(&img));
         }
     } else if let Some(idx_str) = uri.strip_prefix("screen://monitor/") {
         if let Ok(idx) = idx_str.trim().parse::<usize>() {
-            if let Ok(img) = capture::capture_screen(Some(idx), None, CoordMode::Logical) {
+            if let Ok(img) = capture_and_sanitize_resource(
+                capture::CaptureTarget::Monitor { index: Some(idx) },
+                uri,
+            ) {
                 return Some(hash_image_sample(&img));
             }
         }
     } else if let Some(win_id_str) = uri.strip_prefix("screen://window/") {
-        if let Ok(img) = capture::capture_window(win_id_str) {
+        if let Ok(img) = capture_and_sanitize_resource(
+            capture::CaptureTarget::Window {
+                query: win_id_str,
+                client_only: false,
+            },
+            uri,
+        ) {
             return Some(hash_image_sample(&img));
         }
     }
@@ -188,16 +237,12 @@ fn hash_image_sample(img: &image::DynamicImage) -> u64 {
     w.hash(&mut hasher);
     h.hash(&mut hasher);
 
-    if let Some(buf) = img.as_rgba8() {
-        let raw = buf.as_raw();
-        let step = (raw.len() / 512).max(1);
-        for chunk in raw.chunks(step) {
-            if let Some(&byte) = chunk.first() {
-                byte.hash(&mut hasher);
-            }
+    let raw = img.as_bytes();
+    let step = (raw.len() / 512).max(1);
+    for chunk in raw.chunks(step) {
+        if let Some(&byte) = chunk.first() {
+            byte.hash(&mut hasher);
         }
-    } else {
-        img.as_bytes().len().hash(&mut hasher);
     }
 
     hasher.finish()

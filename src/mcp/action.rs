@@ -98,9 +98,36 @@ fn capture_single_target(
         capture::CaptureTarget::Monitor { .. } => "Screen capture failed",
     };
 
-    capture::capture_unified(target, None, CoordMode::Logical)
-        .map(|c| c.image)
-        .map_err(|e| format!("{err_prefix}: {e}"))
+    let captured = capture::capture_unified(target, None, CoordMode::Logical)
+        .map_err(|e| format!("{err_prefix}: {e}"))?;
+
+    let cfg = crate::config::get_active_config();
+    let privacy_policy = crate::config::PrivacyPolicy::from_config(&cfg.privacy);
+
+    let pipeline_opts = crate::pipeline::PipelineOptions {
+        manual_masks: privacy_policy.mask_regions,
+        mask_windows: privacy_policy.mask_windows,
+        exclude_windows: privacy_policy.exclude_windows,
+        allow_missing_mask: privacy_policy.allow_missing_mask,
+        coords_mode: CoordMode::Logical,
+        ..Default::default()
+    };
+
+    let res = crate::pipeline::execute_image_pipeline(
+        captured.image,
+        captured.scale_factor,
+        captured.crop_offset,
+        Some(captured.origin),
+        &pipeline_opts,
+    )
+    .map_err(|e| {
+        format!(
+            "Privacy redaction failed in action verification: {}",
+            e.message
+        )
+    })?;
+
+    Ok(res.image)
 }
 
 /// Execute the `verify_action` MCP tool.
