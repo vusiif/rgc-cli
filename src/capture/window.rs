@@ -213,6 +213,123 @@ pub fn calculate_client_area_bounds(
     }
 }
 
+/// Essential monitor geometry and DPI scale for multi-monitor window resolution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MonitorBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale_factor: f32,
+    pub is_primary: bool,
+}
+
+/// Determine the most appropriate monitor DPI scale factor for a window given its geometry.
+///
+/// In heterogeneous multi-monitor setups with mixed DPI (e.g. 1.0x 1080p and 2.0x 4K displays),
+/// a window may reside entirely or primarily on a secondary monitor.
+/// This algorithm:
+/// 1. Converts each monitor's physical bounds to desktop virtual coordinates using its DPI scale.
+/// 2. Calculates the 2D intersection area (overlap) between the window rectangle and each monitor.
+/// 3. If overlapping, selects the monitor with the largest intersection area.
+/// 4. If no monitor overlaps (e.g. 0-dimension window or offscreen coordinate), falls back to
+///    checking point containment of the window center.
+/// 5. If all geometric checks fail, falls back to the primary monitor, and finally to 1.0.
+pub fn find_best_monitor_scale_factor(
+    monitors: &[MonitorBounds],
+    win_x: i32,
+    win_y: i32,
+    win_w: u32,
+    win_h: u32,
+) -> f32 {
+    if monitors.is_empty() {
+        return 1.0;
+    }
+
+    let mut best_overlap_area: u64 = 0;
+    let mut best_overlap_scale = None;
+
+    let win_r = win_x.saturating_add(win_w as i32);
+    let win_b = win_y.saturating_add(win_h as i32);
+
+    for m in monitors {
+        let scale = if m.scale_factor.is_finite() && m.scale_factor > 0.0 {
+            m.scale_factor as f64
+        } else {
+            1.0
+        };
+
+        // Convert monitor physical resolution to virtual desktop logical size
+        let log_w = (m.width as f64 / scale).round().max(1.0) as i32;
+        let log_h = (m.height as f64 / scale).round().max(1.0) as i32;
+
+        let mon_r = m.x.saturating_add(log_w);
+        let mon_b = m.y.saturating_add(log_h);
+
+        let overlap_x0 = m.x.max(win_x);
+        let overlap_y0 = m.y.max(win_y);
+        let overlap_x1 = mon_r.min(win_r);
+        let overlap_y1 = mon_b.min(win_b);
+
+        if overlap_x1 > overlap_x0 && overlap_y1 > overlap_y0 {
+            let area = (overlap_x1 - overlap_x0) as u64 * (overlap_y1 - overlap_y0) as u64;
+            if area > best_overlap_area {
+                best_overlap_area = area;
+                best_overlap_scale = Some(m.scale_factor);
+            }
+        }
+    }
+
+    if let Some(scale) = best_overlap_scale {
+        return if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+    }
+
+    // Fallback 1: Test point containment of window center
+    let center_x = win_x + (win_w as i32) / 2;
+    let center_y = win_y + (win_h as i32) / 2;
+
+    for m in monitors {
+        let scale = if m.scale_factor.is_finite() && m.scale_factor > 0.0 {
+            m.scale_factor as f64
+        } else {
+            1.0
+        };
+        let log_w = (m.width as f64 / scale).round().max(1.0) as i32;
+        let log_h = (m.height as f64 / scale).round().max(1.0) as i32;
+
+        if center_x >= m.x && center_x < m.x + log_w && center_y >= m.y && center_y < m.y + log_h {
+            return if m.scale_factor.is_finite() && m.scale_factor > 0.0 {
+                m.scale_factor
+            } else {
+                1.0
+            };
+        }
+    }
+
+    // Fallback 2: Primary monitor
+    if let Some(primary) = monitors.iter().find(|m| m.is_primary) {
+        if primary.scale_factor.is_finite() && primary.scale_factor > 0.0 {
+            return primary.scale_factor;
+        }
+    }
+
+    // Fallback 3: First monitor or 1.0
+    monitors
+        .first()
+        .map(|m| {
+            if m.scale_factor.is_finite() && m.scale_factor > 0.0 {
+                m.scale_factor
+            } else {
+                1.0
+            }
+        })
+        .unwrap_or(1.0)
+}
+
 /// Capture screenshot of an application window with optional region crop and client-only area trimming.
 pub fn capture_window_with_options(
     query: &str,
@@ -232,10 +349,12 @@ pub fn capture_window_with_options(
 
     let win_x = target.x().unwrap_or(0);
     let win_y = target.y().unwrap_or(0);
+    let win_w = target.width().unwrap_or(0);
+    let win_h = target.height().unwrap_or(0);
 
     debug!(
-        "Capturing window id={}, title={:?}, origin=({}, {})",
-        id, title, win_x, win_y
+        "Capturing window id={}, title={:?}, bounds=({}, {}) {}x{}",
+        id, title, win_x, win_y, win_w, win_h
     );
     let raw = target
         .capture_image()
@@ -244,7 +363,20 @@ pub fn capture_window_with_options(
 
     let scale_factor = get_monitors()
         .ok()
-        .and_then(|m| m.first().and_then(|mon| mon.scale_factor().ok()))
+        .map(|monitors| {
+            let bounds: Vec<MonitorBounds> = monitors
+                .iter()
+                .map(|m| MonitorBounds {
+                    x: m.x().unwrap_or(0),
+                    y: m.y().unwrap_or(0),
+                    width: m.width().unwrap_or(0),
+                    height: m.height().unwrap_or(0),
+                    scale_factor: m.scale_factor().unwrap_or(1.0),
+                    is_primary: m.is_primary().unwrap_or(false),
+                })
+                .collect();
+            find_best_monitor_scale_factor(&bounds, win_x, win_y, win_w, win_h)
+        })
         .unwrap_or(1.0);
 
     let mut base_crop_offset = (0u32, 0u32);
@@ -354,5 +486,73 @@ mod tests {
         // With titlebar removal (32px * 1.0 = 32px):
         let (tx, ty, tw, th) = calculate_client_area_bounds(&rgba, 1.0, true);
         assert_eq!((tx, ty, tw, th), (10, 10 + 32, 80, 80 - 32));
+    }
+
+    #[test]
+    fn test_find_best_monitor_scale_factor_multi_monitor() {
+        // Monitor 1: Primary 1080p at (0, 0), physical 1920x1080, scale 1.0 (logical 1920x1080)
+        let m1 = MonitorBounds {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale_factor: 1.0,
+            is_primary: true,
+        };
+        // Monitor 2: Secondary 4K at (1920, 0), physical 3840x2160, scale 2.0 (logical 1920x1080: span 1920..3840)
+        let m2 = MonitorBounds {
+            x: 1920,
+            y: 0,
+            width: 3840,
+            height: 2160,
+            scale_factor: 2.0,
+            is_primary: false,
+        };
+        let monitors = vec![m1, m2];
+
+        // 1. Window entirely on Monitor 1
+        assert_eq!(
+            find_best_monitor_scale_factor(&monitors, 100, 100, 800, 600),
+            1.0
+        );
+
+        // 2. Window entirely on Monitor 2 (x = 2200, width = 800)
+        assert_eq!(
+            find_best_monitor_scale_factor(&monitors, 2200, 100, 800, 600),
+            2.0
+        );
+
+        // 3. Window spanning both monitors: mostly on Monitor 2
+        // Window from x = 1800 to 2600 (width = 800):
+        // Overlap with Monitor 1: 1800..1920 = 120px
+        // Overlap with Monitor 2: 1920..2600 = 680px
+        assert_eq!(
+            find_best_monitor_scale_factor(&monitors, 1800, 100, 800, 600),
+            2.0
+        );
+
+        // 4. Window spanning both monitors: mostly on Monitor 1
+        // Window from x = 1300 to 2000 (width = 700):
+        // Overlap with Monitor 1: 1300..1920 = 620px
+        // Overlap with Monitor 2: 1920..2000 = 80px
+        assert_eq!(
+            find_best_monitor_scale_factor(&monitors, 1300, 100, 700, 600),
+            1.0
+        );
+
+        // 5. Zero-dimension window at (2500, 500) (inside Monitor 2)
+        assert_eq!(
+            find_best_monitor_scale_factor(&monitors, 2500, 500, 0, 0),
+            2.0
+        );
+
+        // 6. Window completely outside all monitors (off-screen) -> falls back to primary monitor
+        assert_eq!(
+            find_best_monitor_scale_factor(&monitors, -5000, -5000, 100, 100),
+            1.0
+        );
+
+        // 7. Empty monitors list -> fallback to 1.0
+        assert_eq!(find_best_monitor_scale_factor(&[], 100, 100, 800, 600), 1.0);
     }
 }

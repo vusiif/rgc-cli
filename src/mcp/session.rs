@@ -53,39 +53,53 @@ impl SessionManager {
         }
     }
 
-    fn cleanup_map(map: &mut HashMap<String, SessionRecord>) {
+    fn prune_expired(map: &mut HashMap<String, SessionRecord>) {
         let now = Instant::now();
         map.retain(|_, record| now.saturating_duration_since(record.last_accessed) < SESSION_TTL);
-
-        while map.len() >= MAX_CONCURRENT_SESSIONS {
-            if let Some(oldest_key) = map
-                .iter()
-                .min_by_key(|(_, r)| r.last_accessed)
-                .map(|(k, _)| k.clone())
-            {
-                map.remove(&oldest_key);
-            } else {
-                break;
-            }
-        }
     }
 
     /// Prune expired sessions older than TTL and evict oldest if capacity exceeded.
     pub fn cleanup(&self) {
         if let Ok(mut map) = self.sessions.lock() {
-            Self::cleanup_map(&mut map);
+            Self::prune_expired(&mut map);
+            while map.len() > MAX_CONCURRENT_SESSIONS {
+                if let Some(oldest_key) = map
+                    .iter()
+                    .min_by_key(|(_, r)| r.last_accessed)
+                    .map(|(k, _)| k.clone())
+                {
+                    map.remove(&oldest_key);
+                } else {
+                    break;
+                }
+            }
         }
     }
 
     pub fn get(&self, session_id: &str) -> Option<SessionRecord> {
         let mut map = self.sessions.lock().ok()?;
-        Self::cleanup_map(&mut map);
-        map.get(session_id).cloned()
+        Self::prune_expired(&mut map);
+        if let Some(record) = map.get_mut(session_id) {
+            record.last_accessed = Instant::now();
+            Some(record.clone())
+        } else {
+            None
+        }
     }
 
     pub fn update(&self, session_id: String, image: DynamicImage, frame_index: u64) {
         if let Ok(mut map) = self.sessions.lock() {
-            Self::cleanup_map(&mut map);
+            Self::prune_expired(&mut map);
+            // If capacity is reached and inserting a brand new session, evict the LRU session
+            if !map.contains_key(&session_id) && map.len() >= MAX_CONCURRENT_SESSIONS {
+                if let Some(oldest_key) = map
+                    .iter()
+                    .min_by_key(|(_, r)| r.last_accessed)
+                    .map(|(k, _)| k.clone())
+                {
+                    map.remove(&oldest_key);
+                }
+            }
             map.insert(
                 session_id,
                 SessionRecord {
@@ -619,6 +633,59 @@ mod tests {
 
         manager.reset("test-01");
         assert!(manager.get("test-01").is_none());
+    }
+
+    #[test]
+    fn test_session_manager_lru_capacity_and_retention() {
+        let manager = SessionManager::new();
+        let dummy_img = DynamicImage::new_rgba8(10, 10);
+
+        // Fill up to maximum concurrent capacity (16 sessions)
+        for i in 0..MAX_CONCURRENT_SESSIONS {
+            let id = format!("session-{i:02}");
+            manager.update(id, dummy_img.clone(), i as u64);
+            // Tiny sleep or monotonic clock tick ensures unique last_accessed timestamps
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        // Verify all 16 sessions are retained and get() does NOT evict any session
+        for i in 0..MAX_CONCURRENT_SESSIONS {
+            let id = format!("session-{i:02}");
+            let rec = manager
+                .get(&id)
+                .unwrap_or_else(|| panic!("Session {id} should exist"));
+            assert_eq!(rec.frame_index, i as u64);
+        }
+
+        // Access session-00 again so it is the most recently accessed
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(manager.get("session-00").is_some());
+
+        // Update session-01 in place; should NOT evict any session
+        std::thread::sleep(Duration::from_millis(2));
+        manager.update("session-01".to_string(), dummy_img.clone(), 999);
+        assert_eq!(manager.get("session-01").unwrap().frame_index, 999);
+        assert_eq!(
+            manager.sessions.lock().unwrap().len(),
+            MAX_CONCURRENT_SESSIONS
+        );
+
+        // Now insert session-16 (17th unique session)
+        // Since session-02 was accessed earliest among the remaining sessions, it should be the LRU victim
+        std::thread::sleep(Duration::from_millis(2));
+        manager.update("session-16".to_string(), dummy_img.clone(), 16);
+
+        // Check map size remains capped at 16
+        assert_eq!(
+            manager.sessions.lock().unwrap().len(),
+            MAX_CONCURRENT_SESSIONS
+        );
+        // session-00, session-01, and session-16 must be present
+        assert!(manager.get("session-00").is_some());
+        assert!(manager.get("session-01").is_some());
+        assert!(manager.get("session-16").is_some());
+        // session-02 was the LRU victim
+        assert!(manager.get("session-02").is_none());
     }
 
     #[test]
