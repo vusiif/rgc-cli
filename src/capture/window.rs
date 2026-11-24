@@ -332,15 +332,12 @@ pub fn find_best_monitor_scale_factor(
         .unwrap_or(1.0)
 }
 
-/// Capture screenshot of an application window with optional region crop and client-only area trimming.
-pub fn capture_window_with_options(
-    query: &str,
+/// Capture screenshot of an application window instance with optional region crop and client-only area trimming.
+pub fn capture_window_instance(
+    target: &Window,
     region: Option<&Region>,
     client_only: bool,
 ) -> Result<CapturedWindow, CaptureError> {
-    let windows = get_windows()?;
-    let target = find_window(&windows, query)?;
-
     let is_minimized = target.is_minimized().unwrap_or(false);
     let title = target.title().unwrap_or_else(|_| "Untitled".to_string());
     let id = target.id().unwrap_or(0);
@@ -438,6 +435,42 @@ pub fn capture_window_with_options(
             window_origin: (win_x, win_y),
         })
     }
+}
+
+/// Find the currently focused/active desktop window.
+/// Scans desktop windows for one reporting `is_focused() == Ok(true)` and not minimized.
+pub fn find_active_window(windows: &[Window]) -> Result<&Window, CaptureError> {
+    for w in windows {
+        if w.is_focused().unwrap_or(false) && !w.is_minimized().unwrap_or(false) {
+            let width = w.width().unwrap_or(0);
+            let height = w.height().unwrap_or(0);
+            if width > 0 && height > 0 {
+                return Ok(w);
+            }
+        }
+    }
+    Err(CaptureError::ActiveWindowNotFound)
+}
+
+/// Capture screenshot of the currently active/focused window with optional region crop and client-only area trimming.
+pub fn capture_active_window_with_options(
+    region: Option<&Region>,
+    client_only: bool,
+) -> Result<CapturedWindow, CaptureError> {
+    let windows = get_windows()?;
+    let target = find_active_window(&windows)?;
+    capture_window_instance(target, region, client_only)
+}
+
+/// Capture screenshot of an application window with optional region crop and client-only area trimming.
+pub fn capture_window_with_options(
+    query: &str,
+    region: Option<&Region>,
+    client_only: bool,
+) -> Result<CapturedWindow, CaptureError> {
+    let windows = get_windows()?;
+    let target = find_window(&windows, query)?;
+    capture_window_instance(target, region, client_only)
 }
 
 /// Capture screenshot of an application window along with display metrics and crop offsets.

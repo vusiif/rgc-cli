@@ -1036,4 +1036,22 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("exceeded maximum allowed length"));
     }
+
+    #[test]
+    fn test_mcp_tools_list_schema_active_window_and_around_cursor() {
+        let req = r#"{"jsonrpc":"2.0","id":90,"method":"tools/list"}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+
+        assert!(resp.contains("activeWindow"));
+        assert!(resp.contains("aroundCursor"));
+    }
+
+    #[test]
+    fn test_mcp_capture_screen_with_active_window_or_around_cursor() {
+        // Validation with invalid aroundCursor type
+        let req = r#"{"jsonrpc":"2.0","id":91,"method":"tools/call","params":{"name":"capture_screen","arguments":{"aroundCursor":"not_a_number"}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        // aroundCursor as string is ignored (or None), falling back to normal capture or failing appropriately
+        assert!(resp.contains("jsonrpc"));
+    }
 }

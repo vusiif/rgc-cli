@@ -17,7 +17,7 @@
 use image::{DynamicImage, RgbaImage};
 
 use crate::action::{self, ClickMarker, DragMarker};
-use crate::api::{ApiError, CursorInfo, UiElement};
+use crate::api::{ApiError, CursorInfo, ErrorCode, UiElement};
 use crate::capture;
 use crate::cli::{CoordMode, MaskRegion, MaskWindow};
 use crate::coords::{CoordinateSpaceInfo, CoordinateTransform};
@@ -52,6 +52,8 @@ pub struct PipelineOptions {
     pub template_match: Option<crate::template::TemplateMatchOptions>,
     pub clicks: Vec<ClickMarker>,
     pub drags: Vec<DragMarker>,
+    /// Optional crop radius around the mouse cursor in pixels.
+    pub around_cursor: Option<u32>,
     /// Optional cursor position override (useful for deterministic tests).
     pub global_cursor_override: Option<(i32, i32)>,
 }
@@ -98,8 +100,8 @@ pub fn execute_image_pipeline(
     monitor_origin: Option<(i32, i32)>,
     options: &PipelineOptions,
 ) -> Result<PipelineResult, ApiError> {
-    let canvas_w = raw_image.width();
-    let canvas_h = raw_image.height();
+    let mut canvas_w = raw_image.width();
+    let mut canvas_h = raw_image.height();
     let origin = monitor_origin.unwrap_or((0, 0));
 
     // Stage 1: Resolve mouse cursor on unscaled raw canvas
@@ -116,11 +118,58 @@ pub fn execute_image_pipeline(
     );
 
     let mut rgba = raw_image.into_rgba8();
+    let mut effective_crop_offset = crop_offset;
+    let mut raw_canvas_cursor = raw_canvas_cursor;
 
     // Draw cursor overlay on raw canvas before scaling (ensures sharp cursor glyph)
     if (options.cursor || options.highlight_cursor) && raw_canvas_cursor.is_some() {
         if let Some(ref c) = raw_canvas_cursor {
             transform::draw_cursor_overlay_in_place(&mut rgba, c.x, c.y, options.highlight_cursor);
+        }
+    }
+
+    // Stage 1.5: Micro-crop centered around mouse cursor if requested
+    if let Some(radius) = options.around_cursor {
+        let (cx, cy) = if let Some(ref c) = raw_canvas_cursor {
+            if c.visible {
+                (c.x, c.y)
+            } else {
+                return Err(ApiError::new(
+                    ErrorCode::BadArgs,
+                    format!(
+                        "Mouse cursor at ({}, {}) is outside the captured canvas bounds ({}x{})",
+                        c.x,
+                        c.y,
+                        rgba.width(),
+                        rgba.height()
+                    ),
+                )
+                .with_stage("around_cursor_cropping")
+                .with_suggestion("Ensure mouse cursor is inside the target screen or window."));
+            }
+        } else {
+            return Err(ApiError::new(
+                ErrorCode::BadArgs,
+                "Cannot crop around cursor: mouse cursor position is unavailable",
+            )
+            .with_stage("around_cursor_cropping")
+            .with_suggestion("Verify display permissions allow querying cursor position."));
+        };
+
+        let (ac_x, ac_y, ac_w, ac_h) =
+            capture::calculate_around_cursor_crop(cx, cy, radius, rgba.width(), rgba.height())?;
+
+        rgba = image::imageops::crop_imm(&rgba, ac_x, ac_y, ac_w, ac_h).to_image();
+        effective_crop_offset.0 += ac_x;
+        effective_crop_offset.1 += ac_y;
+        canvas_w = rgba.width();
+        canvas_h = rgba.height();
+
+        if let Some(ref mut c) = raw_canvas_cursor {
+            c.x -= ac_x as i32;
+            c.y -= ac_y as i32;
+            c.canvas_x = Some(c.x);
+            c.canvas_y = Some(c.y);
         }
     }
 
@@ -143,7 +192,7 @@ pub fn execute_image_pipeline(
             rgba.width(),
             rgba.height(),
             scale_factor,
-            crop_offset,
+            effective_crop_offset,
             monitor_origin,
             options.coords_mode,
             &options.manual_masks,
@@ -231,7 +280,7 @@ pub fn execute_image_pipeline(
     let transform = CoordinateTransform::new(
         origin,
         scale_factor,
-        crop_offset,
+        effective_crop_offset,
         actual_scale,
         diff_crop_offset,
         (canvas_w, canvas_h),
@@ -652,6 +701,67 @@ mod tests {
         // Screen center: origin (100, 200) + center (60 + 6, 40 + 6) = (166, 246)
         assert_eq!(m.screen_center_x, Some(166));
         assert_eq!(m.screen_center_y, Some(246));
+    }
+
+    #[test]
+    fn test_execute_image_pipeline_around_cursor() {
+        let raw = DynamicImage::new_rgba8(1000, 1000);
+        let options = PipelineOptions {
+            around_cursor: Some(100),
+            // Global cursor in desktop coordinates: origin (1000, 500) + canvas (400, 400) = (1400, 900)
+            global_cursor_override: Some((1400, 900)),
+            ..Default::default()
+        };
+
+        // Origin at (1000, 500)
+        let result = execute_image_pipeline(raw, 1.0, (0, 0), Some((1000, 500)), &options)
+            .expect("Pipeline with around_cursor should succeed");
+
+        // Radius 100 produces 200x200 cropped output
+        assert_eq!(result.image.width(), 200);
+        assert_eq!(result.image.height(), 200);
+
+        // Crop offset shifted by (300, 300)
+        assert_eq!(result.coordinates.initial_crop_offset, (300, 300));
+
+        // Cursor should now be at center (100, 100) of 200x200 crop
+        let cursor = result.cursor.expect("Cursor info should be present");
+        assert_eq!(cursor.x, 100);
+        assert_eq!(cursor.y, 100);
+        assert_eq!(cursor.canvas_x, Some(100));
+        assert_eq!(cursor.canvas_y, Some(100));
+        assert_eq!(cursor.screen_x, Some(1400));
+        assert_eq!(cursor.screen_y, Some(900));
+
+        // Coordinate re-projection check:
+        // (100, 100) in output image corresponds to original screen (1400, 900)
+        let transform = result.coordinates.to_transform();
+        let (screen_x, screen_y) = transform.image_to_screen(100, 100);
+        assert_eq!(screen_x, 1400);
+        assert_eq!(screen_y, 900);
+    }
+
+    #[test]
+    fn test_execute_image_pipeline_around_cursor_boundary_clamp() {
+        let raw = DynamicImage::new_rgba8(500, 500);
+        let options = PipelineOptions {
+            around_cursor: Some(200),
+            // Cursor near top-left: (50, 50)
+            global_cursor_override: Some((50, 50)),
+            ..Default::default()
+        };
+
+        let result = execute_image_pipeline(raw, 1.0, (0, 0), Some((0, 0)), &options)
+            .expect("Boundary clamped around_cursor should succeed");
+
+        // Radius 200 means 400x400 box clamped to [0, 0, 400, 400]
+        assert_eq!(result.image.width(), 400);
+        assert_eq!(result.image.height(), 400);
+        assert_eq!(result.coordinates.initial_crop_offset, (0, 0));
+
+        let cursor = result.cursor.expect("Cursor info should be present");
+        assert_eq!(cursor.x, 50);
+        assert_eq!(cursor.y, 50);
     }
 
     #[test]

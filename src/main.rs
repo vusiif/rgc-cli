@@ -76,7 +76,11 @@ fn main() -> ExitCode {
 }
 
 fn capture_target(args: &Cli) -> Result<capture::UnifiedCaptured, ApiError> {
-    let target = if args.all_monitors {
+    let target = if args.active_window {
+        capture::CaptureTarget::ActiveWindow {
+            client_only: args.client_only,
+        }
+    } else if args.all_monitors {
         capture::CaptureTarget::AllMonitors
     } else if let Some(win_query) = args.window.as_deref().or(args.wait_window.as_deref()) {
         capture::CaptureTarget::Window {
@@ -617,6 +621,7 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
         clicks,
         drags,
         global_cursor_override: None,
+        around_cursor: args.around_cursor,
     };
 
     let pipeline_result = pipeline::execute_image_pipeline(
@@ -1077,6 +1082,7 @@ fn capture_and_sanitize_target(args: &Cli) -> Result<image::DynamicImage, ApiErr
         coords_mode: args.coords,
         scale: args.scale,
         max_dimension: args.max_dimension,
+        around_cursor: args.around_cursor,
         ..Default::default()
     };
     let res = pipeline::execute_image_pipeline(

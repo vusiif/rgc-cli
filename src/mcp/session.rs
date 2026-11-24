@@ -199,6 +199,18 @@ pub fn get_session_tool_definition() -> ToolDefinition {
                     "type": "string",
                     "description": "Window title substring or ID to target."
                 },
+                "activeWindow": {
+                    "type": "boolean",
+                    "description": "Optional flag to target the currently focused/active desktop window."
+                },
+                "clientOnly": {
+                    "type": "boolean",
+                    "description": "Optional flag when capturing a window or activeWindow to trim outer drop shadows and titlebars, returning only the application client/working area."
+                },
+                "aroundCursor": {
+                    "type": "integer",
+                    "description": "Optional radius in pixels to dynamically crop a square bounding box centered around the mouse cursor."
+                },
                 "scale": {
                     "type": "number",
                     "description": "Downscale factor between 0.01 and 1.0 (e.g. 0.5)."
@@ -434,10 +446,25 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
     };
 
     // Step 1: Capture current screen target
-    let target = if let Some(win) = window_query {
+    let active_window = arguments
+        .get("activeWindow")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let client_only = arguments
+        .get("clientOnly")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let around_cursor = arguments
+        .get("aroundCursor")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+
+    let target = if active_window {
+        capture::CaptureTarget::ActiveWindow { client_only }
+    } else if let Some(win) = window_query {
         capture::CaptureTarget::Window {
             query: win,
-            client_only: false,
+            client_only,
         }
     } else {
         capture::CaptureTarget::Monitor { index: monitor }
@@ -494,6 +521,7 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
     let pipeline_opts = PipelineOptions {
         cursor: cursor_flag,
         highlight_cursor: highlight_cursor_flag,
+        around_cursor,
         scale,
         max_dimension,
         som: som_flag,

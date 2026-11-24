@@ -116,6 +116,48 @@ pub fn logical_to_physical_region(
     )
 }
 
+/// Calculate crop rectangle centered around a target point (e.g. cursor position) with boundary clamping.
+///
+/// Given center coordinate `(center_x, center_y)` and `radius`, calculates a bounding box of
+/// `(2 * radius) x (2 * radius)` centered at `(center_x, center_y)` clamped to `(canvas_w, canvas_h)`.
+pub fn calculate_around_cursor_crop(
+    center_x: i32,
+    center_y: i32,
+    radius: u32,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Result<(u32, u32, u32, u32), CaptureError> {
+    if canvas_width == 0 || canvas_height == 0 {
+        return Err(CaptureError::CanvasTooLarge {
+            width: canvas_width,
+            height: canvas_height,
+        });
+    }
+
+    let r = radius as i32;
+    let target_w = (radius.saturating_mul(2)).min(canvas_width);
+    let target_h = (radius.saturating_mul(2)).min(canvas_height);
+
+    let mut x0 = center_x.saturating_sub(r);
+    let mut y0 = center_y.saturating_sub(r);
+
+    if x0 < 0 {
+        x0 = 0;
+    }
+    if y0 < 0 {
+        y0 = 0;
+    }
+
+    if (x0 as u32).saturating_add(target_w) > canvas_width {
+        x0 = (canvas_width.saturating_sub(target_w)) as i32;
+    }
+    if (y0 as u32).saturating_add(target_h) > canvas_height {
+        y0 = (canvas_height.saturating_sub(target_h)) as i32;
+    }
+
+    Ok((x0.max(0) as u32, y0.max(0) as u32, target_w, target_h))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +291,26 @@ mod tests {
         assert!(logical_to_physical_region(&region, -1.0, 1920, 1080).is_err());
         assert!(logical_to_physical_region(&region, f32::NAN, 1920, 1080).is_err());
         assert!(logical_to_physical_region(&region, f32::INFINITY, 1920, 1080).is_err());
+    }
+
+    #[test]
+    fn test_calculate_around_cursor_crop() {
+        // Centered cursor
+        let (x, y, w, h) = calculate_around_cursor_crop(500, 400, 100, 1920, 1080).unwrap();
+        assert_eq!((x, y, w, h), (400, 300, 200, 200));
+
+        // Top-left boundary clamp: cursor at (30, 40), radius 100
+        let (x_tl, y_tl, w_tl, h_tl) =
+            calculate_around_cursor_crop(30, 40, 100, 1920, 1080).unwrap();
+        assert_eq!((x_tl, y_tl, w_tl, h_tl), (0, 0, 200, 200));
+
+        // Bottom-right boundary clamp: cursor at (1910, 1070), radius 100
+        let (x_br, y_br, w_br, h_br) =
+            calculate_around_cursor_crop(1910, 1070, 100, 1920, 1080).unwrap();
+        assert_eq!((x_br, y_br, w_br, h_br), (1720, 880, 200, 200));
+
+        // Canvas smaller than 2*radius: canvas 150x120, radius 100 -> target box clamped to 150x120
+        let (x_s, y_s, w_s, h_s) = calculate_around_cursor_crop(70, 60, 100, 150, 120).unwrap();
+        assert_eq!((x_s, y_s, w_s, h_s), (0, 0, 150, 120));
     }
 }

@@ -55,6 +55,12 @@ pub enum CaptureError {
 
     #[error("Canvas dimensions ({width}x{height}) exceed maximum allowed allocation limit")]
     CanvasTooLarge { width: u32, height: u32 },
+
+    #[error("No active focused window found on desktop")]
+    ActiveWindowNotFound,
+
+    #[error("Mouse cursor position is unavailable or outside the captured bounds")]
+    CursorPositionUnavailable,
 }
 
 impl From<CaptureError> for ApiError {
@@ -160,6 +166,18 @@ impl From<CaptureError> for ApiError {
             )
             .with_stage("canvas_allocation")
             .with_suggestion("Reduce capture region or number of monitors."),
+            CaptureError::ActiveWindowNotFound => ApiError::new(
+                ErrorCode::WindowNotFound,
+                "No active focused window found on desktop.",
+            )
+            .with_stage("active_window_selection")
+            .with_suggestion("Ensure an application window is in the foreground and has focus."),
+            CaptureError::CursorPositionUnavailable => ApiError::new(
+                ErrorCode::BadArgs,
+                "Mouse cursor position is unavailable or outside the captured bounds.",
+            )
+            .with_stage("around_cursor_cropping")
+            .with_suggestion("Ensure the mouse cursor is located within the target display or window bounds."),
         }
     }
 }

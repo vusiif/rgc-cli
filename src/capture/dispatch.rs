@@ -4,7 +4,8 @@ use image::DynamicImage;
 
 use crate::capture::types::{CaptureError, CapturedScreen, CapturedWindow};
 use crate::capture::{
-    capture_all_monitors_with_details, capture_screen_with_details, capture_window_with_options,
+    capture_active_window_with_options, capture_all_monitors_with_details,
+    capture_screen_with_details, capture_window_with_options,
 };
 use crate::cli::{CoordMode, Region};
 
@@ -12,6 +13,7 @@ use crate::cli::{CoordMode, Region};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureTarget<'a> {
     AllMonitors,
+    ActiveWindow { client_only: bool },
     Window { query: &'a str, client_only: bool },
     Monitor { index: Option<usize> },
 }
@@ -56,6 +58,9 @@ pub fn capture_unified(
     match target {
         CaptureTarget::AllMonitors => {
             capture_all_monitors_with_details(region, coords).map(Into::into)
+        }
+        CaptureTarget::ActiveWindow { client_only } => {
+            capture_active_window_with_options(region, client_only).map(Into::into)
         }
         CaptureTarget::Window { query, client_only } => {
             capture_window_with_options(query, region, client_only).map(Into::into)

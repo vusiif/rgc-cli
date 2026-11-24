@@ -78,9 +78,17 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Optional window ID (e.g. '1234') or window title/app name to capture a specific application window instead of a monitor."
                     },
+                    "activeWindow": {
+                        "type": "boolean",
+                        "description": "Optional flag to automatically capture the currently active/focused desktop window. Supports 'clientOnly' to trim titlebars and drop shadows."
+                    },
                     "clientOnly": {
                         "type": "boolean",
-                        "description": "Optional flag when capturing a window to trim outer drop shadows and titlebars, returning only the application client/working area."
+                        "description": "Optional flag when capturing a window or activeWindow to trim outer drop shadows and titlebars, returning only the application client/working area."
+                    },
+                    "aroundCursor": {
+                        "type": "integer",
+                        "description": "Optional radius in pixels to dynamically crop a square bounding box centered around the mouse cursor (e.g. 200 for a 400x400 box)."
                     },
                     "allMonitors": {
                         "type": "boolean",
@@ -939,8 +947,18 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .get("allMonitors")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let active_window = arguments
+        .get("activeWindow")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let client_only = arguments
+        .get("clientOnly")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
-    let target = if all_monitors {
+    let target = if active_window {
+        capture::CaptureTarget::ActiveWindow { client_only }
+    } else if all_monitors {
         capture::CaptureTarget::AllMonitors
     } else if let Some(win_val) = arguments.get("window") {
         let win_query = match win_val.as_str() {
@@ -955,10 +973,6 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
                 };
             }
         };
-        let client_only = arguments
-            .get("clientOnly")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         capture::CaptureTarget::Window {
             query: win_query,
             client_only,
@@ -968,6 +982,7 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
     };
 
     let err_prefix = match target {
+        capture::CaptureTarget::ActiveWindow { .. } => "Active window capture failed",
         capture::CaptureTarget::AllMonitors => "Panorama capture failed",
         capture::CaptureTarget::Window { .. } => "Window capture failed",
         capture::CaptureTarget::Monitor { .. } => "Capture failed",
@@ -1063,6 +1078,11 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         request_allow_missing,
     );
 
+    let around_cursor = arguments
+        .get("aroundCursor")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+
     let pipeline_options = crate::pipeline::PipelineOptions {
         cursor: cursor_flag,
         highlight_cursor: highlight_cursor_flag,
@@ -1089,6 +1109,7 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         clicks: parsed_clicks,
         drags: parsed_drags,
         global_cursor_override: None,
+        around_cursor,
     };
 
     let pipeline_result = match crate::pipeline::execute_image_pipeline(

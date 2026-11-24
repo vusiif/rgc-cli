@@ -31,6 +31,21 @@ pub struct CoordinateSpaceInfo {
     pub output_height: u32,
 }
 
+impl CoordinateSpaceInfo {
+    /// Convert serialized coordinate metadata back into an active `CoordinateTransform`.
+    pub fn to_transform(&self) -> CoordinateTransform {
+        CoordinateTransform::new(
+            self.screen_origin,
+            self.screen_scale_factor,
+            self.initial_crop_offset,
+            self.image_scale,
+            self.diff_crop_offset,
+            (self.canvas_width, self.canvas_height),
+            (self.output_width, self.output_height),
+        )
+    }
+}
+
 /// Bidirectional coordinate transformer tracking coordinate transformations across the pipeline.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CoordinateTransform {

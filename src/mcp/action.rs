@@ -56,6 +56,10 @@ pub fn get_verify_action_tool_definition() -> ToolDefinition {
                     "type": "boolean",
                     "description": "Optional flag to capture multi-monitor desktop panorama."
                 },
+                "activeWindow": {
+                    "type": "boolean",
+                    "description": "Optional flag to automatically capture the currently active window."
+                },
                 "cropToRoi": {
                     "type": "boolean",
                     "description": "Optional flag to crop the returned annotated image to the ROI bounding box around (x, y) (drastically reduces image payload and token size for AI agents)."
@@ -80,8 +84,11 @@ fn capture_single_target(
     window_query: Option<&str>,
     client_only: bool,
     all_monitors: bool,
+    active_window: bool,
 ) -> Result<image::DynamicImage, String> {
-    let target = if all_monitors {
+    let target = if active_window {
+        capture::CaptureTarget::ActiveWindow { client_only }
+    } else if all_monitors {
         capture::CaptureTarget::AllMonitors
     } else if let Some(win) = window_query {
         capture::CaptureTarget::Window {
@@ -93,6 +100,7 @@ fn capture_single_target(
     };
 
     let err_prefix = match target {
+        capture::CaptureTarget::ActiveWindow { .. } => "Active window capture failed",
         capture::CaptureTarget::Window { .. } => "Window capture failed",
         capture::CaptureTarget::AllMonitors => "Panorama capture failed",
         capture::CaptureTarget::Monitor { .. } => "Screen capture failed",
@@ -218,9 +226,19 @@ pub fn execute_verify_action_tool(arguments: &serde_json::Value) -> ToolCallResu
         .get("returnBase64")
         .and_then(|v| v.as_bool())
         .unwrap_or(output_path.is_none());
+    let active_window = arguments
+        .get("activeWindow")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // 1. Capture baseline frame
-    let before_img = match capture_single_target(monitor, window_query, client_only, all_monitors) {
+    let before_img = match capture_single_target(
+        monitor,
+        window_query,
+        client_only,
+        all_monitors,
+        active_window,
+    ) {
         Ok(img) => img,
         Err(e) => {
             return ToolCallResult {
@@ -234,7 +252,13 @@ pub fn execute_verify_action_tool(arguments: &serde_json::Value) -> ToolCallResu
     sleep(Duration::from_millis(timeout_ms));
 
     // 3. Capture follow-up frame
-    let after_img = match capture_single_target(monitor, window_query, client_only, all_monitors) {
+    let after_img = match capture_single_target(
+        monitor,
+        window_query,
+        client_only,
+        all_monitors,
+        active_window,
+    ) {
         Ok(img) => img,
         Err(e) => {
             return ToolCallResult {

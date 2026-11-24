@@ -1,4 +1,4 @@
-use clap::{Parser, ValueEnum};
+use clap::{ArgGroup, Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -214,14 +214,19 @@ pub fn parse_record_duration(s: &str) -> Result<f32, String> {
     name = "rgc-cli",
     version,
     about = "Cross-platform screen capture CLI utility written in Rust",
-    long_about = "Fast, lightweight, and cross-platform screen capture utility supporting multi-monitor selection, high-DPI scaling, clipboard export, and stdout streaming."
+    long_about = "Fast, lightweight, and cross-platform screen capture utility supporting multi-monitor selection, high-DPI scaling, clipboard export, and stdout streaming.",
+    group(
+        ArgGroup::new("window_target")
+            .args(["window", "active_window"])
+            .multiple(false)
+    )
 )]
 pub struct Cli {
     /// Run diagnostic environment check and inspect capture capabilities
     #[arg(
         long = "doctor",
         conflicts_with_all = [
-            "mcp", "list_monitors", "list_windows", "completions", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
+            "mcp", "list_monitors", "list_windows", "completions", "benchmark", "monitor", "window", "active_window", "client_only", "all_monitors", "region", "around_cursor", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff", "tile_diff", "tile_size",
@@ -237,7 +242,7 @@ pub struct Cli {
     #[arg(
         long = "mcp",
         conflicts_with_all = [
-            "doctor", "list_monitors", "list_windows", "completions", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
+            "doctor", "list_monitors", "list_windows", "completions", "benchmark", "monitor", "window", "active_window", "client_only", "all_monitors", "region", "around_cursor", "output",
             "output_file", "output_dir", "clipboard", "delay", "format",
             "coords", "json", "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff", "tile_diff", "tile_size",
@@ -254,7 +259,7 @@ pub struct Cli {
         short = 'l',
         long = "list-monitors",
         conflicts_with_all = [
-            "doctor", "mcp", "list_windows", "completions", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
+            "doctor", "mcp", "list_windows", "completions", "benchmark", "monitor", "window", "active_window", "client_only", "all_monitors", "region", "around_cursor", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff", "tile_diff", "tile_size",
@@ -268,7 +273,7 @@ pub struct Cli {
     #[arg(
         long = "list-windows",
         conflicts_with_all = [
-            "doctor", "mcp", "list_monitors", "completions", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
+            "doctor", "mcp", "list_monitors", "completions", "benchmark", "monitor", "window", "active_window", "client_only", "all_monitors", "region", "around_cursor", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff", "tile_diff", "tile_size",
@@ -284,7 +289,7 @@ pub struct Cli {
         value_name = "SHELL",
         value_enum,
         conflicts_with_all = [
-            "doctor", "mcp", "list_monitors", "list_windows", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
+            "doctor", "mcp", "list_monitors", "list_windows", "benchmark", "monitor", "window", "active_window", "client_only", "all_monitors", "region", "around_cursor", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "format", "json", "open", "mask", "mask_window", "exclude_window",
             "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff", "tile_diff", "tile_size",
@@ -299,7 +304,7 @@ pub struct Cli {
         short = 'm',
         long = "monitor",
         value_name = "INDEX",
-        conflicts_with_all = ["window", "all_monitors"]
+        conflicts_with_all = ["window", "active_window", "all_monitors"]
     )]
     pub monitor: Option<usize>,
 
@@ -308,31 +313,55 @@ pub struct Cli {
         short = 'w',
         long = "window",
         value_name = "ID|TITLE",
-        conflicts_with_all = ["monitor", "all_monitors"]
+        conflicts_with_all = ["monitor", "active_window", "all_monitors"]
     )]
     pub window: Option<String>,
 
+    /// Capture currently focused/active desktop window
+    #[arg(
+        long = "active-window",
+        visible_alias = "active",
+        conflicts_with_all = ["monitor", "window", "all_monitors"]
+    )]
+    pub active_window: bool,
+
     /// Capture only the application window client/working area (trims system drop shadows and titlebars)
-    #[arg(long = "client-only", requires = "window")]
+    #[arg(long = "client-only", requires = "window_target")]
     pub client_only: bool,
 
     /// Capture all connected monitors stitched into a unified virtual desktop panorama
     #[arg(
         short = 'a',
         long = "all-monitors",
-        conflicts_with_all = ["monitor", "window"]
+        conflicts_with_all = ["monitor", "window", "active_window"]
     )]
     pub all_monitors: bool,
 
     /// Region to capture in coordinates: 'x,y,w,h' (e.g. 100,100,800,600)
-    #[arg(short = 'r', long = "region", value_name = "x,y,w,h")]
+    #[arg(
+        short = 'r',
+        long = "region",
+        value_name = "x,y,w,h",
+        conflicts_with = "around_cursor"
+    )]
     pub region: Option<Region>,
+
+    /// Dynamically crop a square bounding box centered around the mouse cursor with radius PX (default: 200px, 400x400 box)
+    #[arg(
+        long = "around-cursor",
+        value_name = "RADIUS",
+        num_args = 0..=1,
+        default_missing_value = "200",
+        value_parser = clap::value_parser!(u32).range(10..=4096),
+        conflicts_with = "region"
+    )]
+    pub around_cursor: Option<u32>,
 
     /// Coordinate system for region cropping: 'logical' (scaled by monitor DPI) or 'physical' (exact pixels)
     #[arg(long = "coords", value_enum, default_value_t = CoordMode::Logical)]
     pub coords: CoordMode,
 
-    /// Redact rectangular region(s) on captured image: 'x,y,w,h[:effect]' (effect: transparent, blackout, pixelate, blur; default: transparent)
+    /// Redact rectangular region(s) on captured image: `x,y,w,h[:effect]` (effect: transparent, blackout, pixelate, blur; default: transparent)
     #[arg(
         long = "mask",
         value_name = "x,y,w,h[:effect]",
@@ -340,11 +369,11 @@ pub struct Cli {
     )]
     pub mask: Vec<MaskRegion>,
 
-    /// Redact active window(s) on captured screen: 'ID|TITLE[:effect]' (effect: transparent, blackout, pixelate, blur; default: transparent)
+    /// Redact active window(s) on captured screen: `ID|TITLE[:effect]` (effect: transparent, blackout, pixelate, blur; default: transparent)
     #[arg(
         long = "mask-window",
         value_name = "ID|TITLE[:effect]",
-        conflicts_with = "window",
+        conflicts_with_all = ["window", "active_window"],
         action = clap::ArgAction::Append
     )]
     pub mask_window: Vec<MaskWindow>,
@@ -353,7 +382,7 @@ pub struct Cli {
     #[arg(
         long = "exclude-window",
         value_name = "ID|TITLE",
-        conflicts_with = "window",
+        conflicts_with_all = ["window", "active_window"],
         action = clap::ArgAction::Append
     )]
     pub exclude_window: Vec<String>,
@@ -487,7 +516,7 @@ pub struct Cli {
     #[arg(
         long = "wait-window",
         value_name = "ID|TITLE",
-        conflicts_with_all = ["monitor", "all_monitors", "window"]
+        conflicts_with_all = ["monitor", "all_monitors", "window", "active_window"]
     )]
     pub wait_window: Option<String>,
 
@@ -1266,12 +1295,60 @@ mod tests {
         assert_eq!(cli.window, Some("Code".to_string()));
         assert!(cli.client_only);
 
-        // Fails if --client-only is passed without -w / --window
+        let cli_active =
+            Cli::try_parse_from(["rgc-cli", "--active-window", "--client-only"]).unwrap();
+        assert!(cli_active.active_window);
+        assert!(cli_active.client_only);
+
+        // Fails if --client-only is passed without -w / --window or --active-window
         assert!(Cli::try_parse_from(["rgc-cli", "--client-only"]).is_err());
         // Fails if --client-only is passed with --doctor
         assert!(
             Cli::try_parse_from(["rgc-cli", "-w", "Code", "--client-only", "--doctor"]).is_err()
         );
+    }
+
+    #[test]
+    fn test_cli_parsing_active_window() {
+        let cli = Cli::try_parse_from(["rgc-cli", "--active-window"]).unwrap();
+        assert!(cli.active_window);
+        assert_eq!(cli.window, None);
+        assert_eq!(cli.monitor, None);
+
+        let cli_alias = Cli::try_parse_from(["rgc-cli", "--active"]).unwrap();
+        assert!(cli_alias.active_window);
+
+        // Conflicts with monitor, window, all-monitors, doctor, mcp
+        assert!(Cli::try_parse_from(["rgc-cli", "--active-window", "-m", "0"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "--active-window", "-w", "Code"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "--active-window", "-a"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "--active-window", "--doctor"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "--active-window", "--mcp"]).is_err());
+        assert!(
+            Cli::try_parse_from(["rgc-cli", "--active-window", "--wait-window", "Code"]).is_err()
+        );
+    }
+
+    #[test]
+    fn test_cli_parsing_around_cursor() {
+        // Default missing value: 200
+        let cli_default = Cli::try_parse_from(["rgc-cli", "--around-cursor"]).unwrap();
+        assert_eq!(cli_default.around_cursor, Some(200));
+
+        // Custom radius
+        let cli_custom = Cli::try_parse_from(["rgc-cli", "--around-cursor", "350"]).unwrap();
+        assert_eq!(cli_custom.around_cursor, Some(350));
+
+        // Conflict with --region
+        assert!(Cli::try_parse_from(["rgc-cli", "--around-cursor", "-r", "0,0,100,100"]).is_err());
+
+        // Range validation: < 10 or > 4096 fails
+        assert!(Cli::try_parse_from(["rgc-cli", "--around-cursor", "5"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "--around-cursor", "5000"]).is_err());
+
+        // Conflicts with doctor / mcp
+        assert!(Cli::try_parse_from(["rgc-cli", "--around-cursor", "--doctor"]).is_err());
+        assert!(Cli::try_parse_from(["rgc-cli", "--around-cursor", "--mcp"]).is_err());
     }
 
     #[test]
