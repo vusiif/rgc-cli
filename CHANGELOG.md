@@ -5,6 +5,46 @@ All notable changes to `rgc-cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.0] - 2026-11-24
+
+### Security & Hardening
+- **Universal Privacy Redaction Coverage (P0-01)**:
+  - Unified privacy enforcement across all capture pathways: `--watch` mode, MCP `screen://*` visual resources, MCP `verify_action`, and MCP `find_template` pre-sanitizing images before comparison or output.
+- **Strict Configuration Enforcement (P0-02 & P0-03)**:
+  - Added global `ACTIVE_CONFIG` propagation ensuring explicit `--config` settings bind to both CLI and MCP workflows.
+  - Hardened `load_explicit` to halt on unreadable or invalid configuration files rather than silently falling back to defaults.
+  - Introduced `PrivacyConfig.strict`, preventing request parameters (`allowMissingMask=true`) from downgrading privacy constraints.
+- **Transactional State Management & Resource Protection (P1-01 to P1-06)**:
+  - Ensured `capture_session` baselines commit only after successful disk writing and Base64 encoding.
+  - Re-projected, clipped, and translated Set-of-Mark (SoM) element bounding boxes upon difference cropping.
+  - Added target fingerprinting (`target_fingerprint`) to auto-reset session baselines when target windows, monitors, or scale factors change.
+  - Bounded MCP standard input reading with `read_bounded_line` (16MB cap) and enforced a global 256MB session memory cache limit with LRU eviction and zero-copy `Arc<DynamicImage>` sharing.
+
+### Performance & Algorithms
+- **Vectorized Template Matching (`f32`)**:
+  - Replaced `f64` grayscale buffers with `f32`, halving memory footprint and accelerating Normalized Cross-Correlation (NCC) with CPU FMA auto-vectorization.
+- **Lazy Integral Image Evaluation**:
+  - Integral image buffers are allocated only for fully opaque templates; transparent cutouts skip integral image computation entirely, saving ~133MB per 4K frame.
+- **Thread-Safe Template Caching (`TemplateCache`)**:
+  - Cached pre-normalized template features globally to eliminate repetitive variance calculations across consecutive frames.
+- **ROI Sub-Region Search**:
+  - Implemented `find_template_matches_in_roi` with automatic desktop coordinate re-projection, exposed via the MCP `region` parameter.
+- **Spatial Tile Difference Engine**:
+  - Introduced `calculate_tile_diff` and `DiffTile`, decomposing UI changes into discrete blocks with row-stride fast-paths (`c_slice == r_slice`) for memory-speed comparison.
+- **16x16 Grid Resource Sampling**:
+  - Replaced linear byte sampling with 256-tile spatial grid sampling, eliminating notification blind spots.
+
+### Features
+- **Smart Conditional Waiting**:
+  - `--wait-stable <MS>` (and MCP `waitStableMs`): Automatically waits until visual changes settle for `<MS>` ms before capturing, eliminating half-rendered transition frames.
+  - `--wait-window <QUERY>`: Polls until a target window appears and is ready, eliminating cold-start race conditions.
+  - `--wait-template <IMAGE_PATH>` (and MCP `waitTimeoutMs`): Waits until a target template or icon renders on screen.
+- **Tile Diff CLI & JSON Integration**:
+  - Added `--tile-diff` and `--tile-size <PIXELS>` (default: 32) to compute discrete spatial diff tiles against `--diff-with`.
+  - Extended `CaptureResultJson` with `tiles: Option<Vec<DiffTile>>` for machine-readable JSON consumers.
+
+---
+
 ## [2.12.0] - 2026-11-24
 
 ### Security & Privacy
