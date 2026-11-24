@@ -65,7 +65,9 @@ pub fn resolve_mask_region(
     }
 }
 
-/// Compute the intersection of a window's physical bounds with the target monitor's physical canvas.
+/// Compute the intersection of a window's bounds with the target monitor's physical canvas.
+/// Window coordinates from OS window servers (Win32 / macOS / Wayland) are in logical coordinates.
+/// Scales window relative position and dimensions by `scale_factor` to match the physical canvas.
 /// Returns (x, y, width, height) relative to the captured image canvas (after optional crop offset).
 #[allow(dead_code, clippy::too_many_arguments)]
 pub fn resolve_window_mask_bounds(
@@ -75,18 +77,26 @@ pub fn resolve_window_mask_bounds(
     win_h: u32,
     mon_x: i32,
     mon_y: i32,
+    scale_factor: f32,
     crop_offset_x: u32,
     crop_offset_y: u32,
     canvas_w: u32,
     canvas_h: u32,
 ) -> Option<(u32, u32, u32, u32)> {
-    let rel_x = (win_x - mon_x) - crop_offset_x as i32;
-    let rel_y = (win_y - mon_y) - crop_offset_y as i32;
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor as f64
+    } else {
+        1.0
+    };
+    let rel_x = ((win_x - mon_x) as f64 * scale).round() as i32 - crop_offset_x as i32;
+    let rel_y = ((win_y - mon_y) as f64 * scale).round() as i32 - crop_offset_y as i32;
+    let scaled_w = (win_w as f64 * scale).round() as u32;
+    let scaled_h = (win_h as f64 * scale).round() as u32;
 
     let x0 = rel_x.clamp(0, canvas_w as i32) as u32;
     let y0 = rel_y.clamp(0, canvas_h as i32) as u32;
-    let x1 = (rel_x + win_w as i32).clamp(0, canvas_w as i32) as u32;
-    let y1 = (rel_y + win_h as i32).clamp(0, canvas_h as i32) as u32;
+    let x1 = (rel_x + scaled_w as i32).clamp(0, canvas_w as i32) as u32;
+    let y1 = (rel_y + scaled_h as i32).clamp(0, canvas_h as i32) as u32;
 
     if x0 < x1 && y0 < y1 {
         Some((x0, y0, x1 - x0, y1 - y0))
@@ -289,6 +299,7 @@ pub fn build_redactions(
                         win_h,
                         mon_x,
                         mon_y,
+                        scale_factor,
                         crop_offset.0,
                         crop_offset.1,
                         canvas_w,
@@ -369,23 +380,37 @@ mod tests {
 
     #[test]
     fn test_resolve_window_mask_bounds() {
-        // Monitor at (0, 0), resolution 2560x1440, no crop
+        // Monitor at (0, 0), resolution 2560x1440, no crop, scale 1.0
         let bounds =
-            resolve_window_mask_bounds(100, 200, 800, 600, 0, 0, 0, 0, 2560, 1440).unwrap();
+            resolve_window_mask_bounds(100, 200, 800, 600, 0, 0, 1.0, 0, 0, 2560, 1440).unwrap();
         assert_eq!(bounds, (100, 200, 800, 600));
 
-        // Monitor at (2560, 0), window at (2600, 100) -> relative to monitor is (40, 100)
+        // Monitor at (2560, 0), window at (2600, 100) -> relative to monitor is (40, 100), scale 1.0
         let bounds_m2 =
-            resolve_window_mask_bounds(2600, 100, 500, 400, 2560, 0, 0, 0, 1920, 1080).unwrap();
+            resolve_window_mask_bounds(2600, 100, 500, 400, 2560, 0, 1.0, 0, 0, 1920, 1080)
+                .unwrap();
         assert_eq!(bounds_m2, (40, 100, 500, 400));
 
-        // Crop offset (50, 50) on 2560x1440
+        // Crop offset (50, 50) on 2560x1440, scale 1.0
         let bounds_crop =
-            resolve_window_mask_bounds(100, 200, 800, 600, 0, 0, 50, 50, 1000, 800).unwrap();
+            resolve_window_mask_bounds(100, 200, 800, 600, 0, 0, 1.0, 50, 50, 1000, 800).unwrap();
         assert_eq!(bounds_crop, (50, 150, 800, 600));
 
+        // High-DPI scale (2.0x) on 4K canvas (3840x2160)
+        // Window at logical (100, 200, 800, 600) -> physical (200, 400, 1600, 1200)
+        let bounds_hidpi =
+            resolve_window_mask_bounds(100, 200, 800, 600, 0, 0, 2.0, 0, 0, 3840, 2160).unwrap();
+        assert_eq!(bounds_hidpi, (200, 400, 1600, 1200));
+
+        // High-DPI scale (1.5x) with crop offset (50, 50) on 2560x1440 canvas
+        // Window at logical (100, 200, 800, 600) -> scaled (150, 300, 1200, 900) - crop (50, 50) = (100, 250, 1200, 900)
+        let bounds_hidpi_crop =
+            resolve_window_mask_bounds(100, 200, 800, 600, 0, 0, 1.5, 50, 50, 2560, 1440).unwrap();
+        assert_eq!(bounds_hidpi_crop, (100, 250, 1200, 900));
+
         // Window outside monitor
-        let bounds_none = resolve_window_mask_bounds(3000, 2000, 500, 400, 0, 0, 0, 0, 2560, 1440);
+        let bounds_none =
+            resolve_window_mask_bounds(3000, 2000, 500, 400, 0, 0, 1.0, 0, 0, 2560, 1440);
         assert!(bounds_none.is_none());
     }
 

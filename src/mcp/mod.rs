@@ -955,4 +955,23 @@ mod tests {
             .unwrap_err()
             .contains("exceeds maximum allowed size (32MB)"));
     }
+
+    #[test]
+    fn test_load_untrusted_image_input_heuristic_and_base64() {
+        // A long filename containing dots should NOT be treated as base64
+        let long_file_path = "this_is_a_very_long_file_name_that_exceeds_one_hundred_characters_in_total_length_and_has_dots_in_it.png";
+        let res_path = load_untrusted_image_input(long_file_path, "template");
+        assert!(res_path.is_err());
+        assert!(res_path.unwrap_err().contains("Failed to open image from"));
+
+        // Valid base64 image decoding
+        let img = image::RgbaImage::new(4, 4);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        let b64 = format!("data:image/png;base64,{}", base64_encode(&buf.into_inner()));
+        let loaded =
+            load_untrusted_image_input(&b64, "template").expect("valid base64 should decode");
+        assert_eq!(loaded.width(), 4);
+        assert_eq!(loaded.height(), 4);
+    }
 }

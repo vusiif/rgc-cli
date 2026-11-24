@@ -435,7 +435,8 @@ pub fn validate_mcp_output_path(
 /// Security constraints:
 /// - Base64 strings are capped at 32MB to prevent memory exhaustion DoS.
 /// - File paths are strictly forbidden from path traversal (`..`) and Windows device namespaces (`\\.\`, `//./`).
-/// - Decoded images are checked against decompression bombs (dimensions capped at 16384 x 16384).
+/// - Decoded images are strictly protected against decompression bombs using reader limits
+///   (max width/height 16384, max allocation 256MB).
 pub fn load_untrusted_image_input(
     input_str: &str,
     param_name: &str,
@@ -445,9 +446,18 @@ pub fn load_untrusted_image_input(
         return Err(format!("Parameter '{param_name}' cannot be empty"));
     }
 
-    let img = if trimmed.starts_with("data:image/")
-        || (!trimmed.contains('/') && !trimmed.contains('\\') && trimmed.len() > 100)
-    {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16384);
+    limits.max_image_height = Some(16384);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+
+    let is_base64 = trimmed.starts_with("data:image/")
+        || (!trimmed.contains('/')
+            && !trimmed.contains('\\')
+            && !trimmed.contains('.')
+            && trimmed.len() > 100);
+
+    let img = if is_base64 {
         let raw_b64 = if let Some((_, rest)) = trimmed.split_once(";base64,") {
             rest.trim()
         } else {
@@ -463,7 +473,13 @@ pub fn load_untrusted_image_input(
         let bytes =
             base64_decode(raw_b64).map_err(|e| format!("Invalid base64 in '{param_name}': {e}"))?;
 
-        image::load_from_memory(&bytes)
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes));
+        reader.limits(limits);
+        let reader = reader
+            .with_guessed_format()
+            .map_err(|e| format!("Failed to guess image format in '{param_name}': {e}"))?;
+        reader
+            .decode()
             .map_err(|e| format!("Failed to decode image from memory in '{param_name}': {e}"))?
     } else {
         if trimmed.starts_with(r"\\.\") || trimmed.starts_with("//./") {
@@ -481,8 +497,12 @@ pub fn load_untrusted_image_input(
             }
         }
 
-        image::open(p)
-            .map_err(|e| format!("Failed to open image from '{trimmed}' in '{param_name}': {e}"))?
+        let mut reader = image::ImageReader::open(p)
+            .map_err(|e| format!("Failed to open image from '{trimmed}' in '{param_name}': {e}"))?;
+        reader.limits(limits);
+        reader.decode().map_err(|e| {
+            format!("Failed to decode image from '{trimmed}' in '{param_name}': {e}")
+        })?
     };
 
     if img.width() > 16384 || img.height() > 16384 {

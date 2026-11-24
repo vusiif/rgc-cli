@@ -261,9 +261,16 @@ pub fn execute_image_pipeline(
             let a11y_nodes = if let Some(ref override_nodes) = options.a11y_nodes_override {
                 override_nodes.clone()
             } else {
+                let scale = if transform.screen_scale_factor.is_finite()
+                    && transform.screen_scale_factor > 0.0
+                {
+                    transform.screen_scale_factor as f64
+                } else {
+                    1.0
+                };
                 let (screen_w, screen_h) = (
-                    (canvas_w as f64 * transform.screen_scale_factor as f64).round() as u32,
-                    (canvas_h as f64 * transform.screen_scale_factor as f64).round() as u32,
+                    (canvas_w as f64 / scale).round() as u32,
+                    (canvas_h as f64 / scale).round() as u32,
                 );
                 crate::accessibility::query_system_accessibility_nodes(Some((
                     origin.0, origin.1, screen_w, screen_h,
