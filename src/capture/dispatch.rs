@@ -66,6 +66,24 @@ pub fn capture_unified(
     }
 }
 
+/// Wait until a target window appears and can be captured, returning unified coordinates.
+pub fn wait_for_window_capture(
+    query: &str,
+    region: Option<&Region>,
+    client_only: bool,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<UnifiedCaptured, CaptureError> {
+    crate::capture::window::wait_for_window_with_options(
+        query,
+        region,
+        client_only,
+        timeout,
+        interval,
+    )
+    .map(Into::into)
+}
+
 /// Wait for a visual change between successive capture frames or until timeout.
 ///
 /// Returns the latest captured frame and whether a significant visual change was detected.
@@ -100,6 +118,44 @@ where
     }
 
     Ok((baseline, detected_change))
+}
+
+/// Wait until successive capture frames remain visually stable (no significant changes)
+/// for at least `stable_duration`, or until `timeout` expires.
+///
+/// Returns the latest captured frame and whether stability was successfully achieved.
+pub fn wait_for_visual_stability<F, E>(
+    mut capture_fn: F,
+    diff_threshold: u8,
+    stable_duration: Duration,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<(UnifiedCaptured, bool), E>
+where
+    F: FnMut() -> Result<UnifiedCaptured, E>,
+{
+    let mut baseline = capture_fn()?;
+    let start_time = Instant::now();
+    let poll_interval = interval.max(Duration::from_millis(10));
+    let mut last_change_time = Instant::now();
+
+    while start_time.elapsed() < timeout {
+        std::thread::sleep(poll_interval);
+        let next_captured = capture_fn()?;
+        let diff = crate::transform::calculate_image_diff(
+            &next_captured.image,
+            &baseline.image,
+            diff_threshold,
+        );
+        if diff.changed && (diff.changed_pixels >= 50 || diff.changed_percent >= 0.05) {
+            last_change_time = Instant::now();
+        } else if last_change_time.elapsed() >= stable_duration {
+            return Ok((next_captured, true));
+        }
+        baseline = next_captured;
+    }
+
+    Ok((baseline, false))
 }
 
 #[cfg(test)]
@@ -163,5 +219,61 @@ mod tests {
         .unwrap();
 
         assert!(!changed);
+    }
+
+    #[test]
+    fn test_wait_for_visual_stability_achieved() {
+        let capture_mock = || {
+            Ok::<_, String>(UnifiedCaptured {
+                image: DynamicImage::ImageRgba8(RgbaImage::new(40, 40)),
+                scale_factor: 1.0,
+                crop_offset: (0, 0),
+                origin: (0, 0),
+            })
+        };
+
+        let (_captured, stable) = wait_for_visual_stability(
+            capture_mock,
+            16,
+            Duration::from_millis(30),
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+        )
+        .unwrap();
+
+        assert!(stable);
+    }
+
+    #[test]
+    fn test_wait_for_visual_stability_timeout_on_constant_change() {
+        let mut frame_id = 0;
+        let capture_mock = move || {
+            frame_id += 1;
+            let mut rgba = RgbaImage::new(40, 40);
+            // Constantly change pixels every frame with high delta (0 vs 255)
+            let color = if frame_id % 2 == 0 { 255 } else { 0 };
+            for y in 0..10 {
+                for x in 0..10 {
+                    rgba.put_pixel(x, y, image::Rgba([color, color, color, 255]));
+                }
+            }
+            Ok::<_, String>(UnifiedCaptured {
+                image: DynamicImage::ImageRgba8(rgba),
+                scale_factor: 1.0,
+                crop_offset: (0, 0),
+                origin: (0, 0),
+            })
+        };
+
+        let (_captured, stable) = wait_for_visual_stability(
+            capture_mock,
+            10,
+            Duration::from_millis(50),
+            Duration::from_millis(70),
+            Duration::from_millis(10),
+        )
+        .unwrap();
+
+        assert!(!stable);
     }
 }

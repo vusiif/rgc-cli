@@ -292,6 +292,8 @@ pub struct CaptureResultJson {
     pub coordinates: Option<CoordinateSpaceInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matches: Option<Vec<TemplateMatchResult>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tiles: Option<Vec<crate::transform::DiffTile>>,
 }
 
 /// Structured JSON representation of the continuous recording result.

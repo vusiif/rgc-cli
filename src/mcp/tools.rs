@@ -180,6 +180,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "boolean",
                         "description": "Optional flag to wait for screen/window visual change before capturing (ideal for UI automation & click validation)."
                     },
+                    "waitStableMs": {
+                        "type": "integer",
+                        "description": "Optional duration in milliseconds the screen must remain visually stable (no changes) before capturing (ideal for settling animations)."
+                    },
                     "waitTimeoutMs": {
                         "type": "integer",
                         "description": "Optional timeout in milliseconds to wait for visual change before capturing (default: 5000)."
@@ -287,6 +291,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "region": {
                         "type": "string",
                         "description": "Optional region of interest (ROI) in 'X,Y,WIDTH,HEIGHT' format to accelerate matching and constrain search scope."
+                    },
+                    "waitTimeoutMs": {
+                        "type": "integer",
+                        "description": "Optional timeout in milliseconds to wait for template to appear before returning (default: 0 / immediate)."
                     }
                 },
                 "required": ["template"],
@@ -970,7 +978,28 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
             .map_err(|e| format!("{err_prefix}: {e}"))
     };
 
-    let captured = if wait_change {
+    let wait_stable_ms = arguments
+        .get("waitStableMs")
+        .and_then(|v| v.as_u64())
+        .filter(|&ms| ms > 0);
+
+    let captured = if let Some(stable_ms) = wait_stable_ms {
+        match capture::wait_for_visual_stability(
+            &mut capture_once,
+            diff_threshold,
+            std::time::Duration::from_millis(stable_ms),
+            std::time::Duration::from_millis(wait_timeout_ms),
+            std::time::Duration::from_millis(wait_interval_ms),
+        ) {
+            Ok((c, _)) => c,
+            Err(err_msg) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text { text: err_msg }],
+                    is_error: true,
+                };
+            }
+        }
+    } else if wait_change {
         match capture::wait_for_visual_change(
             &mut capture_once,
             diff_threshold,
@@ -1208,6 +1237,10 @@ pub fn execute_find_template_tool(arguments: &serde_json::Value) -> ToolCallResu
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
     let window_query = arguments.get("window").and_then(|v| v.as_str());
+    let wait_timeout_ms = arguments
+        .get("waitTimeoutMs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     // Load template image (base64 or file path) safely
     let tpl_img = match load_untrusted_image_input(tpl_str, "template") {
@@ -1220,94 +1253,107 @@ pub fn execute_find_template_tool(arguments: &serde_json::Value) -> ToolCallResu
         }
     };
 
-    // Capture screen or window
-    let captured = if let Some(win_q) = window_query {
-        match capture::capture_window_with_details(win_q, None) {
-            Ok(c) => (c.image, c.scale_factor, c.crop_offset, c.window_origin),
-            Err(e) => {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Failed to capture window '{win_q}': {e}"),
-                    }],
-                    is_error: true,
-                };
-            }
-        }
-    } else {
-        match capture::capture_screen_with_details(monitor, None, CoordMode::Physical) {
-            Ok(c) => (c.image, c.scale_factor, c.crop_offset, c.monitor_origin),
-            Err(e) => {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Failed to capture screen: {e}"),
-                    }],
-                    is_error: true,
-                };
-            }
-        }
-    };
-
-    let (image, scale_factor, crop_offset, origin) = captured;
-
-    // Apply active PrivacyPolicy so templates cannot match on or leak masked/sensitive content
-    let cfg = crate::config::get_active_config();
-    let privacy_policy = crate::config::PrivacyPolicy::from_config(&cfg.privacy);
-    let pipeline_opts = crate::pipeline::PipelineOptions {
-        manual_masks: privacy_policy.mask_regions,
-        mask_windows: privacy_policy.mask_windows,
-        exclude_windows: privacy_policy.exclude_windows,
-        allow_missing_mask: privacy_policy.allow_missing_mask,
-        coords_mode: CoordMode::Physical,
-        ..Default::default()
-    };
-    let sanitized_res = match crate::pipeline::execute_image_pipeline(
-        image,
-        scale_factor,
-        crop_offset,
-        Some(origin),
-        &pipeline_opts,
-    ) {
-        Ok(res) => res,
-        Err(e) => {
-            return ToolCallResult {
-                content: vec![ToolContent::Text {
-                    text: format!(
-                        "Privacy redaction failed during template search: {}",
-                        e.message
-                    ),
-                }],
-                is_error: true,
-            };
-        }
-    };
-
-    let rgba = sanitized_res.image.into_rgba8();
-    let img_w = rgba.width();
-    let img_h = rgba.height();
-
     let roi = arguments
         .get("region")
         .or_else(|| arguments.get("roi"))
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<crate::cli::Region>().ok());
 
-    let mut matches = crate::template::find_template_matches_in_roi(
-        &rgba,
-        &tpl_img,
-        roi.as_ref(),
-        threshold,
-        max_matches,
-    );
-    let transform = crate::coords::CoordinateTransform::new(
-        origin,
-        scale_factor,
-        crop_offset,
-        1.0,
-        (0, 0),
-        (img_w, img_h),
-        (img_w, img_h),
-    );
-    crate::template::enrich_matches_with_coordinates(&mut matches, &transform);
+    let capture_and_search = || -> Result<Vec<crate::api::TemplateMatchResult>, String> {
+        let captured = if let Some(win_q) = window_query {
+            match capture::capture_window_with_details(win_q, None) {
+                Ok(c) => (c.image, c.scale_factor, c.crop_offset, c.window_origin),
+                Err(e) => return Err(format!("Failed to capture window '{win_q}': {e}")),
+            }
+        } else {
+            match capture::capture_screen_with_details(monitor, None, CoordMode::Physical) {
+                Ok(c) => (c.image, c.scale_factor, c.crop_offset, c.monitor_origin),
+                Err(e) => return Err(format!("Failed to capture screen: {e}")),
+            }
+        };
+
+        let (image, scale_factor, crop_offset, origin) = captured;
+        let cfg = crate::config::get_active_config();
+        let privacy_policy = crate::config::PrivacyPolicy::from_config(&cfg.privacy);
+        let pipeline_opts = crate::pipeline::PipelineOptions {
+            manual_masks: privacy_policy.mask_regions,
+            mask_windows: privacy_policy.mask_windows,
+            exclude_windows: privacy_policy.exclude_windows,
+            allow_missing_mask: privacy_policy.allow_missing_mask,
+            coords_mode: CoordMode::Physical,
+            ..Default::default()
+        };
+        let sanitized_res = crate::pipeline::execute_image_pipeline(
+            image,
+            scale_factor,
+            crop_offset,
+            Some(origin),
+            &pipeline_opts,
+        )
+        .map_err(|e| {
+            format!(
+                "Privacy redaction failed during template search: {}",
+                e.message
+            )
+        })?;
+
+        let rgba = sanitized_res.image.into_rgba8();
+        let img_w = rgba.width();
+        let img_h = rgba.height();
+
+        let mut matches = crate::template::find_template_matches_in_roi(
+            &rgba,
+            &tpl_img,
+            roi.as_ref(),
+            threshold,
+            max_matches,
+        );
+        let transform = crate::coords::CoordinateTransform::new(
+            origin,
+            scale_factor,
+            crop_offset,
+            1.0,
+            (0, 0),
+            (img_w, img_h),
+            (img_w, img_h),
+        );
+        crate::template::enrich_matches_with_coordinates(&mut matches, &transform);
+        Ok(matches)
+    };
+
+    let matches = if wait_timeout_ms > 0 {
+        let start_time = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(wait_timeout_ms);
+        let poll_interval = std::time::Duration::from_millis(50);
+        loop {
+            match capture_and_search() {
+                Ok(m) => {
+                    if !m.is_empty() || start_time.elapsed() >= timeout {
+                        break m;
+                    }
+                }
+                Err(e) => {
+                    if start_time.elapsed() >= timeout {
+                        return ToolCallResult {
+                            content: vec![ToolContent::Text { text: e }],
+                            is_error: true,
+                        };
+                    }
+                }
+            }
+            std::thread::sleep(poll_interval);
+        }
+    } else {
+        match capture_and_search() {
+            Ok(m) => m,
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text { text: e }],
+                    is_error: true,
+                };
+            }
+        }
+    };
 
     match serde_json::to_string_pretty(&matches) {
         Ok(json_str) => ToolCallResult {

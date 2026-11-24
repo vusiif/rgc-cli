@@ -258,6 +258,14 @@ pub fn get_session_tool_definition() -> ToolDefinition {
                 "tileSize": {
                     "type": "integer",
                     "description": "Spatial grid tile size in pixels (16-512, default: 64) when 'tiles' is enabled."
+                },
+                "waitStableMs": {
+                    "type": "integer",
+                    "description": "Optional duration in milliseconds the screen must remain visually stable (no changes) before capturing."
+                },
+                "waitTimeoutMs": {
+                    "type": "integer",
+                    "description": "Optional timeout in milliseconds for visual stability waiting (default: 5000)."
                 }
             },
             "additionalProperties": false
@@ -435,15 +443,45 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         capture::CaptureTarget::Monitor { index: monitor }
     };
 
-    let c = match capture::capture_unified(target.clone(), None, CoordMode::Logical) {
-        Ok(c) => c,
-        Err(e) => {
-            return ToolCallResult {
-                content: vec![ToolContent::Text {
-                    text: format!("Session capture failed: {e}"),
-                }],
-                is_error: true,
-            };
+    let wait_stable_ms = arguments
+        .get("waitStableMs")
+        .and_then(|v| v.as_u64())
+        .filter(|&ms| ms > 0);
+    let wait_timeout_ms = arguments
+        .get("waitTimeoutMs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5000);
+
+    let mut capture_once = || {
+        capture::capture_unified(target.clone(), None, CoordMode::Logical)
+            .map_err(|e| format!("Session capture failed: {e}"))
+    };
+
+    let c = if let Some(stable_ms) = wait_stable_ms {
+        match capture::wait_for_visual_stability(
+            &mut capture_once,
+            16,
+            std::time::Duration::from_millis(stable_ms),
+            std::time::Duration::from_millis(wait_timeout_ms),
+            std::time::Duration::from_millis(100),
+        ) {
+            Ok((c, _)) => c,
+            Err(err_msg) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text { text: err_msg }],
+                    is_error: true,
+                };
+            }
+        }
+    } else {
+        match capture_once() {
+            Ok(c) => c,
+            Err(err_msg) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text { text: err_msg }],
+                    is_error: true,
+                };
+            }
         }
     };
 

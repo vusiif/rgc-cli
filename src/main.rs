@@ -78,7 +78,7 @@ fn main() -> ExitCode {
 fn capture_target(args: &Cli) -> Result<capture::UnifiedCaptured, ApiError> {
     let target = if args.all_monitors {
         capture::CaptureTarget::AllMonitors
-    } else if let Some(ref win_query) = args.window {
+    } else if let Some(win_query) = args.window.as_deref().or(args.wait_window.as_deref()) {
         capture::CaptureTarget::Window {
             query: win_query,
             client_only: args.client_only,
@@ -357,6 +357,111 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
         );
 
         (follow_up, Some((click_marker, verification)))
+    } else if let Some(ref win_query) = args.wait_window {
+        let timeout = Duration::from_millis(args.wait_timeout);
+        let interval = Duration::from_millis(args.wait_interval.max(10));
+
+        if !args.quiet && !args.json {
+            let msg = format!(
+                "Waiting for window '{win_query}' to appear (timeout: {} ms)...",
+                args.wait_timeout
+            );
+            if is_stdout {
+                eprintln!("{msg}");
+            } else {
+                println!("{msg}");
+            }
+        }
+
+        let captured = capture::wait_for_window_capture(
+            win_query,
+            args.region.as_ref(),
+            args.client_only,
+            timeout,
+            interval,
+        )
+        .map_err(ApiError::from)?;
+
+        (captured, None)
+    } else if let Some(ref tpl_path) = args.wait_template {
+        let timeout = Duration::from_millis(args.wait_timeout);
+        let interval = Duration::from_millis(args.wait_interval.max(10));
+        let tpl_img = image::open(tpl_path).map_err(|e| {
+            ApiError::new(
+                ErrorCode::BadArgs,
+                format!(
+                    "Failed to open template image '{}': {e}",
+                    tpl_path.display()
+                ),
+            )
+            .with_stage("template_matching")
+            .with_suggestion("Ensure the path points to a valid image file.")
+        })?;
+
+        if !args.quiet && !args.json {
+            let msg = format!(
+                "Waiting for template '{}' to appear (timeout: {} ms)...",
+                tpl_path.display(),
+                args.wait_timeout
+            );
+            if is_stdout {
+                eprintln!("{msg}");
+            } else {
+                println!("{msg}");
+            }
+        }
+
+        let (captured, matches) = template::wait_for_template_matches(
+            || capture_target(&args),
+            &tpl_img,
+            args.template_threshold,
+            args.template_max_matches,
+            args.region.as_ref(),
+            timeout,
+            interval,
+        )?;
+
+        if matches.is_empty() {
+            debug!(
+                "No template matches found before timeout ({:?}), proceeding with latest frame",
+                timeout
+            );
+        }
+
+        (captured, None)
+    } else if let Some(stable_ms) = args.wait_stable {
+        let timeout = Duration::from_millis(args.wait_timeout);
+        let interval = Duration::from_millis(args.wait_interval.max(10));
+        let stable_duration = Duration::from_millis(stable_ms);
+
+        if !args.quiet && !args.json {
+            let msg = format!(
+                "Waiting for visual stability for {} ms (timeout: {} ms)...",
+                stable_ms, args.wait_timeout
+            );
+            if is_stdout {
+                eprintln!("{msg}");
+            } else {
+                println!("{msg}");
+            }
+        }
+
+        let (captured, stabilized) = capture::wait_for_visual_stability(
+            || capture_target(&args),
+            args.diff_threshold,
+            stable_duration,
+            timeout,
+            interval,
+        )?;
+
+        if !stabilized {
+            debug!(
+                "Screen did not stabilize before timeout ({:?}), proceeding with latest frame",
+                timeout
+            );
+        }
+
+        (captured, None)
     } else if args.wait_change {
         let timeout = Duration::from_millis(args.wait_timeout);
         let interval = Duration::from_millis(args.wait_interval.max(10));
@@ -480,6 +585,12 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
         None
     };
 
+    let diff_ref_for_tiles = if args.tile_diff {
+        diff_ref.clone()
+    } else {
+        None
+    };
+
     let pipeline_options = pipeline::PipelineOptions {
         cursor: args.cursor,
         highlight_cursor: args.highlight_cursor,
@@ -525,6 +636,19 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
     let drags = pipeline_result.drags.unwrap_or_default();
     let coordinates_info = Some(pipeline_result.coordinates);
 
+    let tile_diff_result = if args.tile_diff {
+        diff_ref_for_tiles.as_ref().map(|ref_image| {
+            crate::transform::calculate_tile_diff(
+                &dynamic_image,
+                ref_image,
+                args.diff_threshold,
+                args.tile_size,
+            )
+        })
+    } else {
+        None
+    };
+
     let img_width = dynamic_image.width();
     let img_height = dynamic_image.height();
 
@@ -559,6 +683,12 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
                 println!(
                     "Diff Analysis: changed={}, changedPixels={} ({:.2}%), bbox={:?}",
                     diff.changed, diff.changed_pixels, diff.changed_percent, diff.bbox
+                );
+            }
+            if let Some(ref t_diff) = tile_diff_result {
+                println!(
+                    "Spatial Tile Diff: {} changed tiles ({:.2}% area, tile size: {}px)",
+                    t_diff.changed_tiles_count, t_diff.changed_percent, t_diff.tile_size
                 );
             }
             if let Some(ref elems) = detected_elements {
@@ -635,6 +765,7 @@ fn run(mut args: Cli) -> Result<(), ApiError> {
             drags: if drags.is_empty() { None } else { Some(drags) },
             coordinates: coordinates_info,
             matches: template_matches,
+            tiles: tile_diff_result.map(|t| t.tiles),
         };
         print_json_success(result_payload)?;
     }
@@ -935,6 +1066,7 @@ pub struct WatchEventJson {
 
 fn capture_and_sanitize_target(args: &Cli) -> Result<image::DynamicImage, ApiError> {
     let captured = capture_target(args)?;
+
     let pipeline_options = pipeline::PipelineOptions {
         cursor: args.cursor,
         highlight_cursor: args.highlight_cursor,

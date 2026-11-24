@@ -224,8 +224,8 @@ pub struct Cli {
             "mcp", "list_monitors", "list_windows", "completions", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
-            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
-            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
+            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff", "tile_diff", "tile_size",
+            "timestamp", "tag", "wait_change", "wait_stable", "wait_window", "wait_template", "wait_timeout", "wait_interval",
             "cursor", "highlight_cursor", "record", "fps",
             "som", "som_threshold", "som_max_elements", "accessibility", "find_template",
             "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
@@ -240,8 +240,8 @@ pub struct Cli {
             "doctor", "list_monitors", "list_windows", "completions", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "format",
             "coords", "json", "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
-            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
-            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
+            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff", "tile_diff", "tile_size",
+            "timestamp", "tag", "wait_change", "wait_stable", "wait_window", "wait_template", "wait_timeout", "wait_interval",
             "cursor", "highlight_cursor", "record", "fps",
             "som", "som_threshold", "som_max_elements", "accessibility", "find_template",
             "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
@@ -257,8 +257,8 @@ pub struct Cli {
             "doctor", "mcp", "list_windows", "completions", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
-            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
-            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
+            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff", "tile_diff", "tile_size",
+            "timestamp", "tag", "wait_change", "wait_stable", "wait_window", "wait_template", "wait_timeout", "wait_interval",
             "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
         ]
     )]
@@ -271,8 +271,8 @@ pub struct Cli {
             "doctor", "mcp", "list_monitors", "completions", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "open", "mask", "mask_window", "exclude_window",
-            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
-            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
+            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff", "tile_diff", "tile_size",
+            "timestamp", "tag", "wait_change", "wait_stable", "wait_window", "wait_template", "wait_timeout", "wait_interval",
             "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
         ]
     )]
@@ -287,8 +287,8 @@ pub struct Cli {
             "doctor", "mcp", "list_monitors", "list_windows", "benchmark", "monitor", "window", "client_only", "all_monitors", "region", "output",
             "output_file", "output_dir", "clipboard", "delay", "coords",
             "scale", "max_dimension", "quality", "format", "json", "open", "mask", "mask_window", "exclude_window",
-            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff",
-            "timestamp", "tag", "wait_change", "wait_timeout", "wait_interval",
+            "grid", "diff_with", "diff_threshold", "crop_changed", "highlight_diff", "tile_diff", "tile_size",
+            "timestamp", "tag", "wait_change", "wait_stable", "wait_window", "wait_template", "wait_timeout", "wait_interval",
             "click_at", "drag", "verify_click", "verify_radius", "verify_timeout", "verify_threshold"
         ]
     )]
@@ -455,6 +455,14 @@ pub struct Cli {
     #[arg(long = "highlight-diff", requires = "diff_with")]
     pub highlight_diff: bool,
 
+    /// Compute discrete spatial diff tiles against reference image (--diff-with)
+    #[arg(long = "tile-diff", requires = "diff_with")]
+    pub tile_diff: bool,
+
+    /// Tile size in pixels for spatial tile diff calculation (default: 32)
+    #[arg(long = "tile-size", value_name = "PIXELS", default_value_t = 32)]
+    pub tile_size: u32,
+
     /// Burn a discrete UTC/local timestamp watermark badge onto the output screenshot
     #[arg(long = "timestamp")]
     pub timestamp: bool,
@@ -464,10 +472,30 @@ pub struct Cli {
     pub tag: Option<String>,
 
     /// Wait for screen/window visual change before capturing (ideal for UI automation & click validation)
-    #[arg(long = "wait-change")]
+    #[arg(long = "wait-change", conflicts_with = "wait_stable")]
     pub wait_change: bool,
 
-    /// Maximum timeout in milliseconds to wait for a visual change before capturing (default: 5000 ms)
+    /// Wait for screen/window to become visually stable (no changes for MS ms) before capturing
+    #[arg(
+        long = "wait-stable",
+        value_name = "MS",
+        conflicts_with = "wait_change"
+    )]
+    pub wait_stable: Option<u64>,
+
+    /// Wait for window matching query to appear and be visible before capturing (up to --wait-timeout MS)
+    #[arg(
+        long = "wait-window",
+        value_name = "ID|TITLE",
+        conflicts_with_all = ["monitor", "all_monitors", "window"]
+    )]
+    pub wait_window: Option<String>,
+
+    /// Wait for template image to appear before capturing (up to --wait-timeout MS)
+    #[arg(long = "wait-template", value_name = "IMAGE_PATH")]
+    pub wait_template: Option<std::path::PathBuf>,
+
+    /// Maximum timeout in milliseconds to wait for a visual change or condition before capturing (default: 5000 ms)
     #[arg(long = "wait-timeout", value_name = "MS", default_value_t = 5000)]
     pub wait_timeout: u64,
 
@@ -1244,5 +1272,58 @@ mod tests {
         assert!(
             Cli::try_parse_from(["rgc-cli", "-w", "Code", "--client-only", "--doctor"]).is_err()
         );
+    }
+
+    #[test]
+    fn test_cli_parsing_smart_wait_and_tile_diff() {
+        // Wait stable
+        let cli_stable = Cli::try_parse_from([
+            "rgc-cli",
+            "--wait-stable",
+            "400",
+            "--wait-timeout",
+            "4000",
+            "--wait-interval",
+            "50",
+        ])
+        .unwrap();
+        assert_eq!(cli_stable.wait_stable, Some(400));
+        assert_eq!(cli_stable.wait_timeout, 4000);
+        assert_eq!(cli_stable.wait_interval, 50);
+
+        // Conflict: --wait-stable and --wait-change
+        assert!(Cli::try_parse_from(["rgc-cli", "--wait-stable", "400", "--wait-change"]).is_err());
+
+        // Wait window
+        let cli_win = Cli::try_parse_from(["rgc-cli", "--wait-window", "Terminal"]).unwrap();
+        assert_eq!(cli_win.wait_window, Some("Terminal".to_string()));
+
+        // Conflict: --wait-window with -w / --window or -m / --monitor
+        assert!(
+            Cli::try_parse_from(["rgc-cli", "--wait-window", "Terminal", "-w", "Other"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["rgc-cli", "--wait-window", "Terminal", "-m", "0"]).is_err());
+
+        // Wait template
+        let cli_tpl = Cli::try_parse_from(["rgc-cli", "--wait-template", "btn.png"]).unwrap();
+        assert_eq!(
+            cli_tpl.wait_template,
+            Some(std::path::PathBuf::from("btn.png"))
+        );
+
+        // Tile diff requires diff-with
+        assert!(Cli::try_parse_from(["rgc-cli", "--tile-diff"]).is_err());
+
+        let cli_tiles = Cli::try_parse_from([
+            "rgc-cli",
+            "--diff-with",
+            "ref.png",
+            "--tile-diff",
+            "--tile-size",
+            "64",
+        ])
+        .unwrap();
+        assert!(cli_tiles.tile_diff);
+        assert_eq!(cli_tiles.tile_size, 64);
     }
 }

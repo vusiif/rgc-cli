@@ -520,6 +520,45 @@ pub fn enrich_matches_with_coordinates(
     }
 }
 
+/// Wait until a template image appears in capture frames with confidence >= `threshold`,
+/// or until `timeout` expires.
+///
+/// Returns the latest captured frame and matched locations.
+pub fn wait_for_template_matches<F, E>(
+    mut capture_fn: F,
+    template: &DynamicImage,
+    threshold: f32,
+    max_matches: usize,
+    roi: Option<&crate::cli::Region>,
+    timeout: std::time::Duration,
+    interval: std::time::Duration,
+) -> Result<(crate::capture::UnifiedCaptured, Vec<TemplateMatchResult>), E>
+where
+    F: FnMut() -> Result<crate::capture::UnifiedCaptured, E>,
+{
+    let start_time = std::time::Instant::now();
+    let poll_interval = interval.max(std::time::Duration::from_millis(20));
+
+    loop {
+        let captured = capture_fn()?;
+        let target_rgba = match &captured.image {
+            DynamicImage::ImageRgba8(rgba) => rgba.clone(),
+            other => other.to_rgba8(),
+        };
+        let matches =
+            find_template_matches_in_roi(&target_rgba, template, roi, threshold, max_matches);
+        if !matches.is_empty() {
+            return Ok((captured, matches));
+        }
+
+        if start_time.elapsed() >= timeout {
+            return Ok((captured, Vec::new()));
+        }
+
+        std::thread::sleep(poll_interval);
+    }
+}
+
 /// Render high-contrast visual bounding boxes and confidence score badges onto the output image in-place.
 pub fn draw_template_matches_in_place(rgba: &mut RgbaImage, matches: &[TemplateMatchResult]) {
     if matches.is_empty() {
@@ -720,5 +759,47 @@ mod tests {
 
         // Verify identical pointer via Arc::ptr_eq
         assert!(std::sync::Arc::ptr_eq(&tpl1, &tpl2));
+    }
+
+    #[test]
+    fn test_wait_for_template_matches_found() {
+        let mut icon = RgbaImage::new(16, 16);
+        for (x, y, p) in icon.enumerate_pixels_mut() {
+            *p = Rgba([(x * 15) as u8, (y * 15) as u8, 128, 255]);
+        }
+        let template = DynamicImage::ImageRgba8(icon.clone());
+
+        let mut poll_count = 0;
+        let capture_mock = move || {
+            poll_count += 1;
+            let mut screen = RgbaImage::new(60, 60);
+            if poll_count >= 2 {
+                // Stamp icon into screen on second poll
+                for (x, y, p) in icon.enumerate_pixels() {
+                    screen.put_pixel(15 + x, 20 + y, *p);
+                }
+            }
+            Ok::<_, String>(crate::capture::UnifiedCaptured {
+                image: DynamicImage::ImageRgba8(screen),
+                scale_factor: 1.0,
+                crop_offset: (0, 0),
+                origin: (0, 0),
+            })
+        };
+
+        let (_captured, matches) = wait_for_template_matches(
+            capture_mock,
+            &template,
+            0.95,
+            1,
+            None,
+            std::time::Duration::from_millis(500),
+            std::time::Duration::from_millis(10),
+        )
+        .unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].x, 15);
+        assert_eq!(matches[0].y, 20);
     }
 }

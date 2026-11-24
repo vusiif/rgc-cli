@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use image::DynamicImage;
 use log::debug;
 use xcap::Window;
@@ -446,6 +448,32 @@ pub fn capture_window_with_details(
     capture_window_with_options(query, region, false)
 }
 
+/// Wait until an application window matching `query` appears, is not minimized, and can be captured,
+/// or until `timeout` expires.
+pub fn wait_for_window_with_options(
+    query: &str,
+    region: Option<&Region>,
+    client_only: bool,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<CapturedWindow, CaptureError> {
+    let start_time = Instant::now();
+    let poll_interval = interval.max(Duration::from_millis(50));
+
+    loop {
+        match capture_window_with_options(query, region, client_only) {
+            Ok(captured) => return Ok(captured),
+            Err(e) => {
+                if start_time.elapsed() >= timeout {
+                    return Err(e);
+                }
+            }
+        }
+
+        std::thread::sleep(poll_interval);
+    }
+}
+
 /// Capture screenshot of a window and optionally crop to a specified sub-region.
 #[allow(dead_code)]
 pub fn capture_window_with_crop(
@@ -462,6 +490,22 @@ mod tests {
     #[test]
     fn test_capture_window_nonexistent() {
         let err = capture_window("nonexistent_test_window_query_123456").unwrap_err();
+        match err {
+            CaptureError::WindowNotFound(_) | CaptureError::ListWindowsFailed(_) => {}
+            other => panic!("Expected WindowNotFound or ListWindowsFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wait_for_window_timeout_nonexistent() {
+        let err = wait_for_window_with_options(
+            "nonexistent_test_window_query_123456",
+            None,
+            false,
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+        )
+        .unwrap_err();
         match err {
             CaptureError::WindowNotFound(_) | CaptureError::ListWindowsFailed(_) => {}
             other => panic!("Expected WindowNotFound or ListWindowsFailed, got: {other:?}"),
