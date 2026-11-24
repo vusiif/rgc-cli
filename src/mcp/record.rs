@@ -366,6 +366,12 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         if elapsed < interval {
             std::thread::sleep(interval - elapsed);
         }
+
+        // Cap maximum frame iterations to prevent runaway recording loops
+        if stream.frame_count() >= 900 {
+            log::warn!("Recording reached maximum frame limit (900); stopping capture.");
+            break;
+        }
     }
 
     if stream.frame_count() == 0 {
@@ -391,20 +397,71 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
 
     let anim_bytes = anim_buffer.into_inner();
 
+    // Memory circuit breaker: prevent unbounded buffer payloads
+    if anim_bytes.len() > 100 * 1024 * 1024 {
+        return ToolCallResult {
+            content: vec![ToolContent::Text {
+                text: format!(
+                    "Recorded animation size ({} MB) exceeds maximum allowed payload limit (100MB). Reduce duration or FPS.",
+                    anim_bytes.len() / (1024 * 1024)
+                ),
+            }],
+            is_error: true,
+        };
+    }
+
     if let Some(ref p) = output_path {
-        if let Some(parent) = p.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-        }
-        if let Err(e) = std::fs::write(p, &anim_bytes) {
-            let label = if is_webp { "WebP" } else { "GIF" };
+        if !allow_overwrite && p.exists() {
             return ToolCallResult {
                 content: vec![ToolContent::Text {
-                    text: format!("Failed to write recorded {label} to '{}': {e}", p.display()),
+                    text: format!(
+                        "Target file already exists: '{}'. Set allowOverwrite=true to permit overwriting.",
+                        p.display()
+                    ),
                 }],
                 is_error: true,
             };
+        }
+
+        let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let temp_name = format!(
+            ".tmp_rec_{}_{}.tmp",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        let temp_path = parent.join(temp_name);
+
+        let write_res = std::fs::write(&temp_path, &anim_bytes);
+        if let Err(e) = write_res {
+            let _ = std::fs::remove_file(&temp_path);
+            let label = if is_webp { "WebP" } else { "GIF" };
+            return ToolCallResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Failed to write recorded {label} to temporary file: {e}"),
+                }],
+                is_error: true,
+            };
+        }
+
+        if let Err(_rename_err) = std::fs::rename(&temp_path, p) {
+            if let Err(copy_err) = std::fs::copy(&temp_path, p) {
+                let _ = std::fs::remove_file(&temp_path);
+                let label = if is_webp { "WebP" } else { "GIF" };
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!(
+                            "Failed to commit recorded {label} to '{}': {copy_err}",
+                            p.display()
+                        ),
+                    }],
+                    is_error: true,
+                };
+            }
+            let _ = std::fs::remove_file(&temp_path);
         }
     }
 

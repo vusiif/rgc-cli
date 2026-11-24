@@ -52,6 +52,9 @@ pub enum CaptureError {
         monitor_w: u32,
         monitor_h: u32,
     },
+
+    #[error("Canvas dimensions ({width}x{height}) exceed maximum allowed allocation limit")]
+    CanvasTooLarge { width: u32, height: u32 },
 }
 
 impl From<CaptureError> for ApiError {
@@ -151,6 +154,12 @@ impl From<CaptureError> for ApiError {
             )
             .with_stage("region_validation")
             .with_suggestion("Adjust region coordinates to fit within the selected monitor boundaries."),
+            CaptureError::CanvasTooLarge { width, height } => ApiError::new(
+                ErrorCode::RegionOutOfBounds,
+                format!("Canvas dimensions ({width}x{height}) exceed maximum allowed allocation limit."),
+            )
+            .with_stage("canvas_allocation")
+            .with_suggestion("Reduce capture region or number of monitors."),
         }
     }
 }

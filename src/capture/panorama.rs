@@ -61,8 +61,16 @@ pub fn capture_all_monitors_with_details(
 
     let diff_w = (max_x as i64) - (min_x as i64);
     let diff_h = (max_y as i64) - (min_y as i64);
-    let total_w = (diff_w.max(1) as u32).min(32768);
-    let total_h = (diff_h.max(1) as u32).min(32768);
+    let total_w = (diff_w.max(1) as u32).min(16384);
+    let total_h = (diff_h.max(1) as u32).min(16384);
+
+    let total_pixels = (total_w as u64) * (total_h as u64);
+    if total_pixels > 67_108_864 {
+        return Err(CaptureError::CanvasTooLarge {
+            width: total_w,
+            height: total_h,
+        });
+    }
 
     debug!(
         "Stitching multi-monitor panorama: virtual desktop ({}, {})..({}, {}) = {}x{}, displays: {}",
@@ -152,5 +160,19 @@ mod tests {
             | Err(CaptureError::CaptureFailed(_)) => {}
             Err(other) => panic!("Unexpected error from capture_all_monitors: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_canvas_too_large_error_mapping() {
+        let err = CaptureError::CanvasTooLarge {
+            width: 16384,
+            height: 8192,
+        };
+        let api_err = crate::api::ApiError::from(err);
+        assert_eq!(api_err.error_code, crate::api::ErrorCode::RegionOutOfBounds);
+        assert!(api_err.message.contains("16384x8192"));
+        assert!(api_err
+            .message
+            .contains("exceed maximum allowed allocation limit"));
     }
 }

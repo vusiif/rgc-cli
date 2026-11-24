@@ -907,4 +907,52 @@ mod tests {
         assert!(resp.contains(r#""isError":true"#));
         assert!(resp.contains("must be a finite number between 0.1 and 30.0 seconds"));
     }
+
+    #[test]
+    fn test_load_untrusted_image_input_rejects_path_traversal() {
+        let res1 = load_untrusted_image_input("../secret.png", "diffWith");
+        assert!(res1.is_err());
+        assert!(res1
+            .unwrap_err()
+            .contains("Path traversal ('..') is not permitted"));
+
+        let res2 = load_untrusted_image_input("folder/../../etc/passwd", "template");
+        assert!(res2.is_err());
+        assert!(res2
+            .unwrap_err()
+            .contains("Path traversal ('..') is not permitted"));
+
+        // Also test JSON-RPC dispatch
+        let req = r#"{"jsonrpc":"2.0","id":80,"method":"tools/call","params":{"name":"find_template","arguments":{"template":"../secret.png"}}}"#;
+        let resp = handle_mcp_message(req).expect("response expected");
+        assert!(resp.contains(r#""isError":true"#));
+        assert!(resp.contains("Path traversal ('..') is not permitted"));
+    }
+
+    #[test]
+    fn test_load_untrusted_image_input_rejects_device_paths() {
+        let res1 = load_untrusted_image_input(r"\\.\pipe\test", "template");
+        assert!(res1.is_err());
+        assert!(res1.unwrap_err().contains("Device paths are not permitted"));
+
+        let res2 = load_untrusted_image_input("//./GLOBALROOT/test", "diffWith");
+        assert!(res2.is_err());
+        assert!(res2.unwrap_err().contains("Device paths are not permitted"));
+    }
+
+    #[test]
+    fn test_load_untrusted_image_input_rejects_oversized_base64() {
+        // Construct a string that exceeds 32MB cap
+        let prefix = "data:image/png;base64,";
+        let oversize_len = 32 * 1024 * 1024 + 10;
+        let mut huge_str = String::with_capacity(prefix.len() + oversize_len);
+        huge_str.push_str(prefix);
+        huge_str.extend(std::iter::repeat('A').take(oversize_len));
+
+        let res = load_untrusted_image_input(&huge_str, "template");
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .contains("exceeds maximum allowed size (32MB)"));
+    }
 }

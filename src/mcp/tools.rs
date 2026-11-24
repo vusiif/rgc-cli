@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use image::DynamicImage;
+
 use crate::capture;
 use crate::cli::{CoordMode, ImageFormat, Region};
 use crate::doctor;
@@ -428,6 +430,72 @@ pub fn validate_mcp_output_path(
     Ok(p.to_path_buf())
 }
 
+/// Validate and safely load an untrusted image input from a base64 string or filesystem path.
+///
+/// Security constraints:
+/// - Base64 strings are capped at 32MB to prevent memory exhaustion DoS.
+/// - File paths are strictly forbidden from path traversal (`..`) and Windows device namespaces (`\\.\`, `//./`).
+/// - Decoded images are checked against decompression bombs (dimensions capped at 16384 x 16384).
+pub fn load_untrusted_image_input(
+    input_str: &str,
+    param_name: &str,
+) -> Result<DynamicImage, String> {
+    let trimmed = input_str.trim();
+    if trimmed.is_empty() {
+        return Err(format!("Parameter '{param_name}' cannot be empty"));
+    }
+
+    let img = if trimmed.starts_with("data:image/")
+        || (!trimmed.contains('/') && !trimmed.contains('\\') && trimmed.len() > 100)
+    {
+        let raw_b64 = if let Some((_, rest)) = trimmed.split_once(";base64,") {
+            rest.trim()
+        } else {
+            trimmed
+        };
+
+        if raw_b64.len() > 32 * 1024 * 1024 {
+            return Err(format!(
+                "Base64 image payload in '{param_name}' exceeds maximum allowed size (32MB)"
+            ));
+        }
+
+        let bytes =
+            base64_decode(raw_b64).map_err(|e| format!("Invalid base64 in '{param_name}': {e}"))?;
+
+        image::load_from_memory(&bytes)
+            .map_err(|e| format!("Failed to decode image from memory in '{param_name}': {e}"))?
+    } else {
+        if trimmed.starts_with(r"\\.\") || trimmed.starts_with("//./") {
+            return Err(format!(
+                "Device paths are not permitted in '{param_name}': '{trimmed}'"
+            ));
+        }
+
+        let p = Path::new(trimmed);
+        for comp in p.components() {
+            if matches!(comp, std::path::Component::ParentDir) {
+                return Err(format!(
+                    "Path traversal ('..') is not permitted in '{param_name}': '{trimmed}'"
+                ));
+            }
+        }
+
+        image::open(p)
+            .map_err(|e| format!("Failed to open image from '{trimmed}' in '{param_name}': {e}"))?
+    };
+
+    if img.width() > 16384 || img.height() > 16384 {
+        return Err(format!(
+            "Image dimensions ({}x{}) in '{param_name}' exceed maximum allowed size (16384x16384)",
+            img.width(),
+            img.height()
+        ));
+    }
+
+    Ok(img)
+}
+
 pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let monitor = if let Some(m_val) = arguments.get("monitor") {
         if let Some(idx) = m_val.as_u64() {
@@ -652,54 +720,17 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
 
     // Validate and preload reference diff image early to fail fast before capture
     let preloaded_diff_ref = if let Some(diff_str) = diff_with_str {
-        let trimmed = diff_str.trim();
-        let ref_image = if trimmed.starts_with("data:image/")
-            || (!trimmed.contains('/') && !trimmed.contains('\\') && trimmed.len() > 100)
-        {
-            let raw_b64 = if let Some((_, rest)) = trimmed.split_once(";base64,") {
-                rest
-            } else {
-                trimmed
-            };
-            match base64_decode(raw_b64) {
-                Ok(bytes) => match image::load_from_memory(&bytes) {
-                    Ok(img) => img,
-                    Err(e) => {
-                        return ToolCallResult {
-                            content: vec![ToolContent::Text {
-                                text: format!(
-                                    "Failed to decode diff reference image from memory: {e}"
-                                ),
-                            }],
-                            is_error: true,
-                        };
-                    }
-                },
-                Err(e) => {
-                    return ToolCallResult {
-                        content: vec![ToolContent::Text {
-                            text: format!("Invalid base64 in 'diffWith': {e}"),
-                        }],
-                        is_error: true,
-                    };
-                }
+        match load_untrusted_image_input(diff_str, "diffWith") {
+            Ok(img) => Some(img),
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Failed to open diff reference image '{diff_str}': {e}"),
+                    }],
+                    is_error: true,
+                };
             }
-        } else {
-            match image::open(Path::new(trimmed)) {
-                Ok(img) => img,
-                Err(e) => {
-                    return ToolCallResult {
-                        content: vec![ToolContent::Text {
-                            text: format!(
-                                "Failed to open diff reference image from '{trimmed}': {e}"
-                            ),
-                        }],
-                        is_error: true,
-                    };
-                }
-            }
-        };
-        Some(ref_image)
+        }
     } else {
         None
     };
@@ -719,47 +750,15 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .unwrap_or(false);
 
     let preloaded_template_match = if let Some(tpl_str) = find_template_str {
-        let trimmed = tpl_str.trim();
-        let tpl_image = if trimmed.starts_with("data:image/")
-            || (!trimmed.contains('/') && !trimmed.contains('\\') && trimmed.len() > 100)
-        {
-            let raw_b64 = if let Some((_, rest)) = trimmed.split_once(";base64,") {
-                rest
-            } else {
-                trimmed
-            };
-            match base64_decode(raw_b64) {
-                Ok(bytes) => match image::load_from_memory(&bytes) {
-                    Ok(img) => img,
-                    Err(e) => {
-                        return ToolCallResult {
-                            content: vec![ToolContent::Text {
-                                text: format!("Failed to decode template image from memory: {e}"),
-                            }],
-                            is_error: true,
-                        };
-                    }
-                },
-                Err(e) => {
-                    return ToolCallResult {
-                        content: vec![ToolContent::Text {
-                            text: format!("Invalid base64 in 'findTemplate': {e}"),
-                        }],
-                        is_error: true,
-                    };
-                }
-            }
-        } else {
-            match image::open(Path::new(trimmed)) {
-                Ok(img) => img,
-                Err(e) => {
-                    return ToolCallResult {
-                        content: vec![ToolContent::Text {
-                            text: format!("Failed to open template image from '{trimmed}': {e}"),
-                        }],
-                        is_error: true,
-                    };
-                }
+        let tpl_image = match load_untrusted_image_input(tpl_str, "findTemplate") {
+            Ok(img) => img,
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Failed to open template image '{tpl_str}': {e}"),
+                    }],
+                    is_error: true,
+                };
             }
         };
 
@@ -1207,47 +1206,14 @@ pub fn execute_find_template_tool(arguments: &serde_json::Value) -> ToolCallResu
         .map(|v| v as usize);
     let window_query = arguments.get("window").and_then(|v| v.as_str());
 
-    // Load template image (base64 or file path)
-    let tpl_img = if tpl_str.starts_with("data:image/")
-        || (!tpl_str.contains('/') && !tpl_str.contains('\\') && tpl_str.len() > 100)
-    {
-        let raw_b64 = if let Some((_, rest)) = tpl_str.split_once(";base64,") {
-            rest
-        } else {
-            tpl_str
-        };
-        match base64_decode(raw_b64) {
-            Ok(bytes) => match image::load_from_memory(&bytes) {
-                Ok(img) => img,
-                Err(e) => {
-                    return ToolCallResult {
-                        content: vec![ToolContent::Text {
-                            text: format!("Failed to decode template image from memory: {e}"),
-                        }],
-                        is_error: true,
-                    };
-                }
-            },
-            Err(e) => {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Invalid base64 in 'template': {e}"),
-                    }],
-                    is_error: true,
-                };
-            }
-        }
-    } else {
-        match image::open(Path::new(tpl_str)) {
-            Ok(img) => img,
-            Err(e) => {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Failed to open template image from '{tpl_str}': {e}"),
-                    }],
-                    is_error: true,
-                };
-            }
+    // Load template image (base64 or file path) safely
+    let tpl_img = match load_untrusted_image_input(tpl_str, "template") {
+        Ok(img) => img,
+        Err(e) => {
+            return ToolCallResult {
+                content: vec![ToolContent::Text { text: e }],
+                is_error: true,
+            };
         }
     };
 
