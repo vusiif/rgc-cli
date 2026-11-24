@@ -640,26 +640,50 @@ pub fn save_animated_gif(
     Ok(())
 }
 
-/// Helper to extract valid frame bitstream subchunks (ALPH, VP8, VP8L) from a single encoded WebP image.
+/// Helper to extract valid frame bitstream subchunks (optional ALPH + VP8/VP8L) from a single encoded WebP image.
+///
+/// Ensures:
+/// - Safe chunk traversal with integer overflow protection (`checked_add`).
+/// - Strict forward progress (`next_offset > offset`).
+/// - Frame bitstream ends at the conclusion of the `VP8` or `VP8L` chunk, cleanly excluding
+///   any subsequent metadata chunks (e.g. EXIF, XMP, ICCP).
 pub fn extract_frame_subchunks(bytes: &[u8]) -> Option<&[u8]> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
         return None;
     }
-    let mut offset = 12;
+    let mut offset: usize = 12;
     let mut start_chunk = None;
-    while offset + 8 <= bytes.len() {
+    let mut end_chunk = None;
+
+    while offset.checked_add(8)? <= bytes.len() {
         let fourcc = &bytes[offset..offset + 4];
         let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().ok()?) as usize;
-        let padded_size = size + (size % 2);
-        let next_offset = offset + 8 + padded_size;
+        let padded_size = size.checked_add(size % 2)?;
+        let next_offset = offset.checked_add(8)?.checked_add(padded_size)?;
+
+        if next_offset <= offset {
+            return None;
+        }
 
         if (fourcc == b"VP8L" || fourcc == b"VP8 " || fourcc == b"ALPH") && start_chunk.is_none() {
             start_chunk = Some(offset);
         }
+
+        if fourcc == b"VP8L" || fourcc == b"VP8 " {
+            let chunk_end = offset.checked_add(8)?.checked_add(padded_size)?;
+            if chunk_end <= bytes.len() {
+                end_chunk = Some(chunk_end);
+            }
+            break;
+        }
+
         offset = next_offset;
     }
 
-    start_chunk.map(|start| &bytes[start..])
+    match (start_chunk, end_chunk) {
+        (Some(start), Some(end)) if start < end && end <= bytes.len() => Some(&bytes[start..end]),
+        _ => None,
+    }
 }
 
 /// A streaming WebP animation encoder that encodes and flushes frames incrementally using RIFF WebP chunks.
@@ -1186,5 +1210,44 @@ mod tests {
         }
         let webp_bytes = webp_buf.into_inner();
         assert_eq!(&webp_bytes[0..4], b"RIFF");
+    }
+
+    #[test]
+    fn test_extract_frame_subchunks_bounds_and_metadata_exclusion() {
+        // Construct synthetic RIFF WEBP:
+        // 12 bytes RIFF header
+        // VP8L chunk: 4 bytes tag ("VP8L"), 4 bytes size (4), 4 bytes data
+        // EXIF chunk: 4 bytes tag ("EXIF"), 4 bytes size (6), 6 bytes data
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"RIFF\0\0\0\0WEBP");
+
+        let vp8l_offset = buf.len();
+        buf.extend_from_slice(b"VP8L");
+        buf.extend_from_slice(&4u32.to_le_bytes());
+        buf.extend_from_slice(b"DATA"); // 4 bytes data
+        let vp8l_end = buf.len();
+
+        // Trailing metadata
+        buf.extend_from_slice(b"EXIF");
+        buf.extend_from_slice(&6u32.to_le_bytes());
+        buf.extend_from_slice(b"METAFO"); // 6 bytes data
+
+        // Update RIFF size
+        let total_riff_size = (buf.len() - 8) as u32;
+        buf[4..8].copy_from_slice(&total_riff_size.to_le_bytes());
+
+        let extracted = extract_frame_subchunks(&buf).expect("should extract frame subchunk");
+        // Extracted slice must match VP8L tag + size + data, strictly excluding the EXIF chunk
+        assert_eq!(extracted.len(), vp8l_end - vp8l_offset);
+        assert_eq!(&extracted[0..4], b"VP8L");
+        assert_eq!(&extracted[extracted.len() - 4..], b"DATA");
+
+        // Invalid: missing RIFF header
+        assert!(extract_frame_subchunks(&buf[4..]).is_none());
+
+        // Corrupted: chunk size exceeds buffer
+        let mut corrupted = buf.clone();
+        corrupted[vp8l_offset + 4..vp8l_offset + 8].copy_from_slice(&999999u32.to_le_bytes());
+        assert!(extract_frame_subchunks(&corrupted).is_none());
     }
 }

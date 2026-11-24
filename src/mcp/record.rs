@@ -163,6 +163,25 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         }
         None => None,
     };
+
+    // Pre-flight fail-fast check: ensure output directory can be created before capturing
+    if let Some(ref p) = output_path {
+        let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!(
+                            "Failed to create output directory '{}': {e}",
+                            parent.display()
+                        ),
+                    }],
+                    is_error: true,
+                };
+            }
+        }
+    }
+
     let is_webp = if let Some(ref p) = output_path {
         p.extension()
             .and_then(|e| e.to_str())

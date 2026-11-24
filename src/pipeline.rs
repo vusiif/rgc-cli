@@ -422,14 +422,17 @@ pub fn process_recording_frame(
         }
     }
 
-    // 3. Scaling / Max dimension
-    let frame_img = output::apply_image_transforms(
-        DynamicImage::ImageRgba8(raw_rgba.clone()),
-        options.scale,
-        options.max_dimension,
-    );
-
-    let mut rgba = frame_img.into_rgba8();
+    // 3. Scaling / Max dimension (zero-copy buffer ownership transfer)
+    let mut rgba = if options.scale.is_some() || options.max_dimension.is_some() {
+        let frame_img = output::apply_image_transforms(
+            DynamicImage::ImageRgba8(std::mem::take(raw_rgba)),
+            options.scale,
+            options.max_dimension,
+        );
+        frame_img.into_rgba8()
+    } else {
+        std::mem::take(raw_rgba)
+    };
 
     // 4. Grid overlay
     if let Some(grid_step) = options.grid {
