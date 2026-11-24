@@ -37,37 +37,14 @@ impl Default for TemplateMatchOptions {
     }
 }
 
-/// Internal representation of a grayscale image with precomputed 2D integral images.
-struct GrayscaleSearchCanvas {
-    width: usize,
-    #[allow(dead_code)]
-    height: usize,
-    pixels: Vec<f64>,
+/// Precomputed 2D integral images for O(1) rectangular sum and sum-of-squares queries.
+struct IntegralImages {
     sum: Vec<f64>,
     sum_sq: Vec<f64>,
 }
 
-impl GrayscaleSearchCanvas {
-    fn from_rgba(rgba: &RgbaImage) -> Self {
-        let width = rgba.width() as usize;
-        let height = rgba.height() as usize;
-        let mut pixels = vec![0.0f64; width * height];
-
-        let raw = rgba.as_raw();
-        for y in 0..height {
-            let row_offset = y * width * 4;
-            let dest_offset = y * width;
-            for x in 0..width {
-                let px = row_offset + x * 4;
-                let r = raw[px] as f64;
-                let g = raw[px + 1] as f64;
-                let b = raw[px + 2] as f64;
-                pixels[dest_offset + x] = (r * 299.0 + g * 587.0 + b * 114.0) / 1000.0;
-            }
-        }
-
-        // Compute 2D integral images for sum and sum of squares
-        // Dimensions of integral images: (width + 1) * (height + 1)
+impl IntegralImages {
+    fn from_pixels(pixels: &[f32], width: usize, height: usize) -> Self {
         let stride = width + 1;
         let mut sum = vec![0.0f64; (width + 1) * (height + 1)];
         let mut sum_sq = vec![0.0f64; (width + 1) * (height + 1)];
@@ -80,7 +57,7 @@ impl GrayscaleSearchCanvas {
             let int_curr_row = (y + 1) * stride;
 
             for x in 0..width {
-                let val = pixels[px_offset + x];
+                let val = pixels[px_offset + x] as f64;
                 row_sum += val;
                 row_sum_sq += val * val;
 
@@ -89,19 +66,11 @@ impl GrayscaleSearchCanvas {
             }
         }
 
-        Self {
-            width,
-            height,
-            pixels,
-            sum,
-            sum_sq,
-        }
+        Self { sum, sum_sq }
     }
 
-    /// Query the sum of pixel values in rectangle [x, x + w) x [y, y + h) in O(1) time.
     #[inline(always)]
-    fn query_sum(&self, x: usize, y: usize, w: usize, h: usize) -> f64 {
-        let stride = self.width + 1;
+    fn query_sum(&self, stride: usize, x: usize, y: usize, w: usize, h: usize) -> f64 {
         let y0 = y * stride;
         let y1 = (y + h) * stride;
         let x0 = x;
@@ -110,10 +79,8 @@ impl GrayscaleSearchCanvas {
         self.sum[y1 + x1] - self.sum[y0 + x1] - self.sum[y1 + x0] + self.sum[y0 + x0]
     }
 
-    /// Query the sum of squared pixel values in rectangle [x, x + w) x [y, y + h) in O(1) time.
     #[inline(always)]
-    fn query_sum_sq(&self, x: usize, y: usize, w: usize, h: usize) -> f64 {
-        let stride = self.width + 1;
+    fn query_sum_sq(&self, stride: usize, x: usize, y: usize, w: usize, h: usize) -> f64 {
         let y0 = y * stride;
         let y1 = (y + h) * stride;
         let x0 = x;
@@ -123,22 +90,87 @@ impl GrayscaleSearchCanvas {
     }
 }
 
-/// Normalized template representation with optional alpha mask.
-struct PreparedTemplate {
+/// Internal representation of a grayscale image with optional lazily-computed 2D integral images.
+struct GrayscaleSearchCanvas {
     width: usize,
+    #[allow(dead_code)]
     height: usize,
+    pixels: Vec<f32>,
+    integral: Option<IntegralImages>,
+}
+
+impl GrayscaleSearchCanvas {
+    fn from_rgba_sub(
+        rgba: &RgbaImage,
+        x0: usize,
+        y0: usize,
+        width: usize,
+        height: usize,
+        need_integral: bool,
+    ) -> Self {
+        let mut pixels = vec![0.0f32; width * height];
+        let full_width = rgba.width() as usize;
+        let raw = rgba.as_raw();
+
+        for y in 0..height {
+            let row_offset = (y0 + y) * full_width * 4 + x0 * 4;
+            let dest_offset = y * width;
+            for x in 0..width {
+                let px = row_offset + x * 4;
+                let r = raw[px] as f32;
+                let g = raw[px + 1] as f32;
+                let b = raw[px + 2] as f32;
+                pixels[dest_offset + x] = (r * 299.0 + g * 587.0 + b * 114.0) / 1000.0;
+            }
+        }
+
+        let integral = if need_integral {
+            Some(IntegralImages::from_pixels(&pixels, width, height))
+        } else {
+            None
+        };
+
+        Self {
+            width,
+            height,
+            pixels,
+            integral,
+        }
+    }
+
+    #[inline(always)]
+    fn query_sum(&self, x: usize, y: usize, w: usize, h: usize) -> f64 {
+        self.integral
+            .as_ref()
+            .map(|i| i.query_sum(self.width + 1, x, y, w, h))
+            .unwrap_or(0.0)
+    }
+
+    #[inline(always)]
+    fn query_sum_sq(&self, x: usize, y: usize, w: usize, h: usize) -> f64 {
+        self.integral
+            .as_ref()
+            .map(|i| i.query_sum_sq(self.width + 1, x, y, w, h))
+            .unwrap_or(0.0)
+    }
+}
+
+/// Normalized template representation with optional alpha mask.
+pub struct PreparedTemplate {
+    pub width: usize,
+    pub height: usize,
     /// Zero-mean normalized pixel values for active foreground pixels.
-    normalized_pixels: Vec<f64>,
-    /// Active foreground mask indices relative to top-left (dx, dy).
-    active_offsets: Vec<(usize, usize, f64)>,
+    pub normalized_pixels: Vec<f32>,
+    /// Active foreground mask indices relative to top-left (dx, dy, zero_mean_lum).
+    pub active_offsets: Vec<(usize, usize, f32)>,
     /// Number of active foreground pixels.
-    active_count: f64,
+    pub active_count: f32,
     /// Standard deviation / energy denominator of the template.
-    template_norm: f64,
+    pub template_norm: f32,
 }
 
 impl PreparedTemplate {
-    fn from_image(img: &DynamicImage) -> Option<Self> {
+    pub fn from_image(img: &DynamicImage) -> Option<Self> {
         let (width, height) = img.dimensions();
         let width = width as usize;
         let height = height as usize;
@@ -151,7 +183,7 @@ impl PreparedTemplate {
         let raw = rgba.as_raw();
 
         let mut active_offsets = Vec::new();
-        let mut sum = 0.0f64;
+        let mut sum = 0.0f32;
 
         for y in 0..height {
             let row_offset = y * width * 4;
@@ -160,9 +192,9 @@ impl PreparedTemplate {
                 let a = raw[px + 3];
                 // Only consider non-transparent foreground pixels
                 if a >= 128 {
-                    let r = raw[px] as f64;
-                    let g = raw[px + 1] as f64;
-                    let b = raw[px + 2] as f64;
+                    let r = raw[px] as f32;
+                    let g = raw[px + 1] as f32;
+                    let b = raw[px + 2] as f32;
                     let lum = (r * 299.0 + g * 587.0 + b * 114.0) / 1000.0;
                     active_offsets.push((x, y, lum));
                     sum += lum;
@@ -170,13 +202,13 @@ impl PreparedTemplate {
             }
         }
 
-        let active_count = active_offsets.len() as f64;
+        let active_count = active_offsets.len() as f32;
         if active_count < 4.0 {
             return None;
         }
 
         let mean = sum / active_count;
-        let mut variance_sum = 0.0f64;
+        let mut variance_sum = 0.0f32;
 
         for (_, _, lum) in &mut active_offsets {
             *lum -= mean;
@@ -189,7 +221,7 @@ impl PreparedTemplate {
             return None;
         }
 
-        let mut normalized_pixels = vec![0.0f64; width * height];
+        let mut normalized_pixels = vec![0.0f32; width * height];
         for &(x, y, zero_mean_lum) in &active_offsets {
             normalized_pixels[y * width + x] = zero_mean_lum;
         }
@@ -205,12 +237,67 @@ impl PreparedTemplate {
     }
 }
 
-/// Search for occurrences of `template` in `target` image.
+type CachedTemplateMap = std::sync::Mutex<
+    std::collections::HashMap<u64, (std::sync::Arc<PreparedTemplate>, std::time::Instant)>,
+>;
+
+static TEMPLATE_CACHE: std::sync::OnceLock<CachedTemplateMap> = std::sync::OnceLock::new();
+
+fn compute_template_fingerprint(img: &DynamicImage) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    img.dimensions().hash(&mut hasher);
+    let bytes = img.as_bytes();
+    let step = (bytes.len() / 256).max(1);
+    for chunk in bytes.chunks(step) {
+        if let Some(&b) = chunk.first() {
+            b.hash(&mut hasher);
+        }
+    }
+    bytes.len().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Retrieve or compute cached preprocessed template metadata to eliminate duplicate variance/norm calculations.
+pub fn get_or_prepare_template(img: &DynamicImage) -> Option<std::sync::Arc<PreparedTemplate>> {
+    let fp = compute_template_fingerprint(img);
+    let cache =
+        TEMPLATE_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+    if let Ok(mut map) = cache.lock() {
+        if let Some((tpl, accessed)) = map.get_mut(&fp) {
+            *accessed = std::time::Instant::now();
+            return Some(std::sync::Arc::clone(tpl));
+        }
+    }
+
+    let prep = PreparedTemplate::from_image(img)?;
+    let arc_prep = std::sync::Arc::new(prep);
+
+    if let Ok(mut map) = cache.lock() {
+        if map.len() >= 64 {
+            if let Some(oldest_key) = map.iter().min_by_key(|(_, (_, t))| *t).map(|(k, _)| *k) {
+                map.remove(&oldest_key);
+            }
+        }
+        map.insert(
+            fp,
+            (std::sync::Arc::clone(&arc_prep), std::time::Instant::now()),
+        );
+    }
+
+    Some(arc_prep)
+}
+
+/// Search for occurrences of `template` in `target` image, optionally restricted to an ROI sub-region.
 ///
 /// Returns sorted match results in descending order of confidence score.
-pub fn find_template_matches(
+pub fn find_template_matches_in_roi(
     target: &RgbaImage,
     template: &DynamicImage,
+    roi: Option<&crate::cli::Region>,
     threshold: f32,
     max_matches: usize,
 ) -> Vec<TemplateMatchResult> {
@@ -218,99 +305,117 @@ pub fn find_template_matches(
         return Vec::new();
     }
 
-    let prep_template = match PreparedTemplate::from_image(template) {
+    let prep_template = match get_or_prepare_template(template) {
         Some(t) => t,
         None => return Vec::new(),
     };
 
-    let target_w = target.width() as usize;
-    let target_h = target.height() as usize;
-
-    if target_w < prep_template.width || target_h < prep_template.height {
-        return Vec::new();
-    }
-
-    let canvas = GrayscaleSearchCanvas::from_rgba(target);
     let t_w = prep_template.width;
     let t_h = prep_template.height;
-    let max_x = target_w - t_w;
-    let max_y = target_h - t_h;
-
     let has_full_alpha = prep_template.active_offsets.len() == (t_w * t_h);
-    let threshold_f64 = (threshold as f64).clamp(0.0, 1.0);
+
+    // Resolve search canvas with optional ROI sub-sampling
+    let (search_w, search_h, roi_x, roi_y, canvas) = if let Some(r) = roi {
+        let x0 = (r.x.max(0) as usize).min(target.width() as usize);
+        let y0 = (r.y.max(0) as usize).min(target.height() as usize);
+        let x1 = (x0 + r.width as usize).min(target.width() as usize);
+        let y1 = (y0 + r.height as usize).min(target.height() as usize);
+        let rw = x1.saturating_sub(x0);
+        let rh = y1.saturating_sub(y0);
+        if rw < t_w || rh < t_h {
+            return Vec::new();
+        }
+        let sub_canvas =
+            GrayscaleSearchCanvas::from_rgba_sub(target, x0, y0, rw, rh, has_full_alpha);
+        (rw, rh, x0 as u32, y0 as u32, sub_canvas)
+    } else {
+        let w = target.width() as usize;
+        let h = target.height() as usize;
+        if w < t_w || h < t_h {
+            return Vec::new();
+        }
+        let full_canvas = GrayscaleSearchCanvas::from_rgba_sub(target, 0, 0, w, h, has_full_alpha);
+        (w, h, 0u32, 0u32, full_canvas)
+    };
+
+    let max_x = search_w - t_w;
+    let max_y = search_h - t_h;
+    let threshold_f32 = threshold.clamp(0.0, 1.0);
 
     // Multi-scale acceleration check: if search area and template are large,
     // perform coarse step-2 grid scan then refine candidates
     let use_pyramid = (max_x > 200 && max_y > 200) && (t_w >= 16 && t_h >= 16);
     let coarse_step = if use_pyramid { 2 } else { 1 };
-    let coarse_threshold = threshold_f64 * 0.75;
+    let coarse_threshold = threshold_f32 * 0.75;
 
-    let mut raw_candidates: Vec<(usize, usize, f64)> = Vec::new();
+    let mut raw_candidates: Vec<(usize, usize, f32)> = Vec::new();
+
+    let compute_ncc_at = |cx: usize, cy: usize| -> Option<f32> {
+        let (patch_variance, cross_sum) = if has_full_alpha {
+            let sum = canvas.query_sum(cx, cy, t_w, t_h);
+            let sum_sq = canvas.query_sum_sq(cx, cy, t_w, t_h);
+            let var = (sum_sq - (sum * sum) / (prep_template.active_count as f64)) as f32;
+
+            if var <= 1e-4 {
+                (var, 0.0f32)
+            } else {
+                let mut cross = 0.0f32;
+                for ty in 0..t_h {
+                    let src_start = (cy + ty) * search_w + cx;
+                    let tpl_start = ty * t_w;
+                    let src_slice = &canvas.pixels[src_start..src_start + t_w];
+                    let tpl_slice = &prep_template.normalized_pixels[tpl_start..tpl_start + t_w];
+                    for (s, t) in src_slice.iter().zip(tpl_slice.iter()) {
+                        cross += s * t;
+                    }
+                }
+                (var, cross)
+            }
+        } else {
+            let mut p_sum = 0.0f32;
+            let mut p_sum_sq = 0.0f32;
+            let mut cross = 0.0f32;
+            for &(tx, ty, t_val) in &prep_template.active_offsets {
+                let val = canvas.pixels[(cy + ty) * search_w + (cx + tx)];
+                p_sum += val;
+                p_sum_sq += val * val;
+                cross += val * t_val;
+            }
+            let var = p_sum_sq - (p_sum * p_sum) / prep_template.active_count;
+            (var, cross)
+        };
+
+        if patch_variance > 1e-4 {
+            let patch_norm = patch_variance.sqrt();
+            let denom = prep_template.template_norm * patch_norm;
+            if denom > 1e-6 {
+                return Some(cross_sum / denom);
+            }
+        }
+        None
+    };
 
     let mut y = 0;
     while y <= max_y {
         let mut x = 0;
         while x <= max_x {
-            let (patch_variance, cross_sum) = if has_full_alpha {
-                let sum = canvas.query_sum(x, y, t_w, t_h);
-                let sum_sq = canvas.query_sum_sq(x, y, t_w, t_h);
-                let var = sum_sq - (sum * sum) / prep_template.active_count;
-
-                if var <= 1e-4 {
-                    (var, 0.0)
+            if let Some(ncc) = compute_ncc_at(x, y) {
+                let target_thresh = if coarse_step > 1 {
+                    coarse_threshold
                 } else {
-                    let mut cross = 0.0f64;
-                    for ty in 0..t_h {
-                        let src_start = (y + ty) * target_w + x;
-                        let tpl_start = ty * t_w;
-                        let src_slice = &canvas.pixels[src_start..src_start + t_w];
-                        let tpl_slice =
-                            &prep_template.normalized_pixels[tpl_start..tpl_start + t_w];
-                        for (s, t) in src_slice.iter().zip(tpl_slice.iter()) {
-                            cross += s * t;
-                        }
-                    }
-                    (var, cross)
-                }
-            } else {
-                let mut p_sum = 0.0f64;
-                let mut p_sum_sq = 0.0f64;
-                let mut cross = 0.0f64;
-                for &(tx, ty, t_val) in &prep_template.active_offsets {
-                    let val = canvas.pixels[(y + ty) * target_w + (x + tx)];
-                    p_sum += val;
-                    p_sum_sq += val * val;
-                    cross += val * t_val;
-                }
-                let var = p_sum_sq - (p_sum * p_sum) / prep_template.active_count;
-                (var, cross)
-            };
-
-            if patch_variance > 1e-4 {
-                let patch_norm = patch_variance.sqrt();
-                let denom = prep_template.template_norm * patch_norm;
-
-                if denom > 1e-6 {
-                    let ncc = cross_sum / denom;
-                    let target_thresh = if coarse_step > 1 {
-                        coarse_threshold
-                    } else {
-                        threshold_f64
-                    };
-
-                    if ncc >= target_thresh {
-                        raw_candidates.push((x, y, ncc));
-                    }
+                    threshold_f32
+                };
+                if ncc >= target_thresh {
+                    raw_candidates.push((x, y, ncc));
                 }
             }
-
             x += coarse_step;
         }
         y += coarse_step;
     }
 
     // Refinement stage if coarse scan was used
-    let mut refined_matches: Vec<(usize, usize, f64)> =
+    let mut refined_matches: Vec<(usize, usize, f32)> =
         if coarse_step > 1 && !raw_candidates.is_empty() {
             let mut refined = Vec::with_capacity(raw_candidates.len());
             for (cx, cy, _) in raw_candidates {
@@ -319,61 +424,21 @@ pub fn find_template_matches(
                 let rx1 = (cx + 1).min(max_x);
                 let ry1 = (cy + 1).min(max_y);
 
-                let mut best_ncc = 0.0f64;
+                let mut best_ncc = 0.0f32;
                 let mut best_coord = (cx, cy);
 
                 for fy in ry0..=ry1 {
                     for fx in rx0..=rx1 {
-                        let (patch_variance, cross_sum) = if has_full_alpha {
-                            let sum = canvas.query_sum(fx, fy, t_w, t_h);
-                            let sum_sq = canvas.query_sum_sq(fx, fy, t_w, t_h);
-                            let var = sum_sq - (sum * sum) / prep_template.active_count;
-
-                            if var <= 1e-4 {
-                                (var, 0.0)
-                            } else {
-                                let mut cross = 0.0f64;
-                                for ty in 0..t_h {
-                                    let src_start = (fy + ty) * target_w + fx;
-                                    let tpl_start = ty * t_w;
-                                    let src_slice = &canvas.pixels[src_start..src_start + t_w];
-                                    let tpl_slice = &prep_template.normalized_pixels
-                                        [tpl_start..tpl_start + t_w];
-                                    for (s, t) in src_slice.iter().zip(tpl_slice.iter()) {
-                                        cross += s * t;
-                                    }
-                                }
-                                (var, cross)
-                            }
-                        } else {
-                            let mut p_sum = 0.0f64;
-                            let mut p_sum_sq = 0.0f64;
-                            let mut cross = 0.0f64;
-                            for &(tx, ty, t_val) in &prep_template.active_offsets {
-                                let val = canvas.pixels[(fy + ty) * target_w + (fx + tx)];
-                                p_sum += val;
-                                p_sum_sq += val * val;
-                                cross += val * t_val;
-                            }
-                            let var = p_sum_sq - (p_sum * p_sum) / prep_template.active_count;
-                            (var, cross)
-                        };
-
-                        if patch_variance > 1e-4 {
-                            let patch_norm = patch_variance.sqrt();
-                            let denom = prep_template.template_norm * patch_norm;
-                            if denom > 1e-6 {
-                                let ncc = cross_sum / denom;
-                                if ncc > best_ncc {
-                                    best_ncc = ncc;
-                                    best_coord = (fx, fy);
-                                }
+                        if let Some(ncc) = compute_ncc_at(fx, fy) {
+                            if ncc > best_ncc {
+                                best_ncc = ncc;
+                                best_coord = (fx, fy);
                             }
                         }
                     }
                 }
 
-                if best_ncc >= threshold_f64 {
+                if best_ncc >= threshold_f32 {
                     refined.push((best_coord.0, best_coord.1, best_ncc));
                 }
             }
@@ -416,15 +481,28 @@ pub fn find_template_matches(
     selected_matches
         .into_iter()
         .map(|(x, y, conf)| {
+            let final_x = (x as u32) + roi_x;
+            let final_y = (y as u32) + roi_y;
             TemplateMatchResult::new(
-                x as u32,
-                y as u32,
+                final_x,
+                final_y,
                 t_w as u32,
                 t_h as u32,
-                (conf as f32 * 1000.0).round() / 1000.0,
+                (conf * 1000.0).round() / 1000.0,
             )
         })
         .collect()
+}
+
+/// Search for occurrences of `template` across the entire `target` image.
+#[inline]
+pub fn find_template_matches(
+    target: &RgbaImage,
+    template: &DynamicImage,
+    threshold: f32,
+    max_matches: usize,
+) -> Vec<TemplateMatchResult> {
+    find_template_matches_in_roi(target, template, None, threshold, max_matches)
 }
 
 /// Enrich template match results with global OS desktop screen coordinates.
@@ -587,5 +665,60 @@ mod tests {
         let template = DynamicImage::ImageRgba8(icon);
         let matches = find_template_matches(&target, &template, 0.85, 1);
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_template_match_with_roi() {
+        let mut target = RgbaImage::new(200, 200);
+        let mut icon = RgbaImage::new(12, 12);
+        for (x, y, p) in icon.enumerate_pixels_mut() {
+            *p = Rgba([220, (x * 18) as u8, (y * 18) as u8, 255]);
+        }
+
+        // Place icon at (120, 140)
+        for (x, y, p) in icon.enumerate_pixels() {
+            target.put_pixel(120 + x, 140 + y, *p);
+        }
+
+        let template = DynamicImage::ImageRgba8(icon);
+
+        // Search within ROI that covers (100, 100, 80, 80)
+        let roi = crate::cli::Region {
+            x: 100,
+            y: 100,
+            width: 80,
+            height: 80,
+        };
+        let matches = find_template_matches_in_roi(&target, &template, Some(&roi), 0.90, 1);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].x, 120);
+        assert_eq!(matches[0].y, 140);
+        assert!(matches[0].confidence >= 0.99);
+
+        // Search within ROI that does NOT cover the icon (e.g. 0, 0, 50, 50)
+        let outside_roi = crate::cli::Region {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 50,
+        };
+        let outside_matches =
+            find_template_matches_in_roi(&target, &template, Some(&outside_roi), 0.90, 1);
+        assert!(outside_matches.is_empty());
+    }
+
+    #[test]
+    fn test_template_cache_reuse() {
+        let mut icon = RgbaImage::new(16, 16);
+        for (x, y, p) in icon.enumerate_pixels_mut() {
+            *p = Rgba([100, (x * 10) as u8, (y * 10) as u8, 255]);
+        }
+        let template = DynamicImage::ImageRgba8(icon);
+
+        let tpl1 = get_or_prepare_template(&template).expect("Template should prepare");
+        let tpl2 = get_or_prepare_template(&template).expect("Template should prepare");
+
+        // Verify identical pointer via Arc::ptr_eq
+        assert!(std::sync::Arc::ptr_eq(&tpl1, &tpl2));
     }
 }

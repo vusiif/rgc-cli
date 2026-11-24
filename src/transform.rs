@@ -27,6 +27,32 @@ pub struct DiffResult {
     pub bbox: Option<DiffBBox>,
 }
 
+/// Discovered localized visual difference tile.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffTile {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub changed_pixels: u64,
+}
+
+/// Comprehensive tile-based delta detection result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TileDiffResult {
+    pub changed: bool,
+    pub changed_pixels: u64,
+    pub total_pixels: u64,
+    pub changed_percent: f64,
+    pub tile_size: u32,
+    pub changed_tiles_count: usize,
+    pub tiles: Vec<DiffTile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overall_bbox: Option<DiffBBox>,
+}
+
 /// Borrows `DynamicImage` as `&RgbaImage` with zero allocation if already RGBA8,
 /// or converts to owned `RgbaImage` if in a different color space.
 #[inline]
@@ -555,6 +581,159 @@ pub fn calculate_image_diff(
             threshold,
             bbox: None,
         }
+    }
+}
+
+/// Compare current image against a reference image using a grid of spatial tiles.
+///
+/// Divides the image canvas into `tile_size x tile_size` sub-blocks, identifies all individual
+/// blocks that have changed pixels exceeding `threshold`, and computes both per-tile bounding boxes
+/// and an enclosing overall bounding box.
+pub fn calculate_tile_diff(
+    current: &DynamicImage,
+    reference: &DynamicImage,
+    threshold: u8,
+    tile_size: u32,
+) -> TileDiffResult {
+    let curr_cow = borrow_or_convert_rgba8(current);
+    let ref_cow = borrow_or_convert_rgba8(reference);
+
+    let cw = curr_cow.width();
+    let ch = curr_cow.height();
+    let rw = ref_cow.width();
+    let rh = ref_cow.height();
+
+    let total_pixels = (cw as u64) * (ch as u64);
+    let effective_tile_size = tile_size.clamp(16, 512);
+
+    if total_pixels == 0 {
+        return TileDiffResult {
+            changed: false,
+            changed_pixels: 0,
+            total_pixels: 0,
+            changed_percent: 0.0,
+            tile_size: effective_tile_size,
+            changed_tiles_count: 0,
+            tiles: Vec::new(),
+            overall_bbox: None,
+        };
+    }
+
+    let mut total_changed_pixels = 0u64;
+    let mut min_x = u32::MAX;
+    let mut max_x = 0u32;
+    let mut min_y = u32::MAX;
+    let mut max_y = 0u32;
+    let mut tiles = Vec::new();
+
+    let num_tiles_x = cw.div_ceil(effective_tile_size);
+    let num_tiles_y = ch.div_ceil(effective_tile_size);
+
+    let curr_raw = curr_cow.as_raw();
+    let ref_raw = ref_cow.as_raw();
+    let same_dims = (cw == rw) && (ch == rh);
+    let stride = (cw as usize) * 4;
+
+    for ty in 0..num_tiles_y {
+        let tile_y = ty * effective_tile_size;
+        let tile_h = effective_tile_size.min(ch - tile_y);
+
+        for tx in 0..num_tiles_x {
+            let tile_x = tx * effective_tile_size;
+            let tile_w = effective_tile_size.min(cw - tile_x);
+
+            let mut tile_changed = 0u64;
+
+            if same_dims {
+                for y in tile_y..(tile_y + tile_h) {
+                    let row_start = (y as usize) * stride + (tile_x as usize) * 4;
+                    let row_end = row_start + (tile_w as usize) * 4;
+                    let c_slice = &curr_raw[row_start..row_end];
+                    let r_slice = &ref_raw[row_start..row_end];
+
+                    if c_slice == r_slice {
+                        continue;
+                    }
+
+                    for (c_px, r_px) in c_slice.chunks_exact(4).zip(r_slice.chunks_exact(4)) {
+                        let is_diff = if threshold == 0 {
+                            c_px != r_px
+                        } else {
+                            c_px != r_px && (0..4).any(|c| c_px[c].abs_diff(r_px[c]) > threshold)
+                        };
+                        if is_diff {
+                            tile_changed += 1;
+                        }
+                    }
+                }
+            } else {
+                for y in tile_y..(tile_y + tile_h) {
+                    for x in tile_x..(tile_x + tile_w) {
+                        let is_diff = if x < rw && y < rh {
+                            let cp = curr_cow.get_pixel(x, y);
+                            let rp = ref_cow.get_pixel(x, y);
+                            if threshold == 0 {
+                                cp != rp
+                            } else {
+                                cp != rp && (0..4).any(|c| cp[c].abs_diff(rp[c]) > threshold)
+                            }
+                        } else {
+                            true
+                        };
+                        if is_diff {
+                            tile_changed += 1;
+                        }
+                    }
+                }
+            }
+
+            if tile_changed > 0 {
+                total_changed_pixels += tile_changed;
+                min_x = min_x.min(tile_x);
+                max_x = max_x.max(tile_x + tile_w - 1);
+                min_y = min_y.min(tile_y);
+                max_y = max_y.max(tile_y + tile_h - 1);
+
+                tiles.push(DiffTile {
+                    x: tile_x,
+                    y: tile_y,
+                    width: tile_w,
+                    height: tile_h,
+                    changed_pixels: tile_changed,
+                });
+            }
+        }
+    }
+
+    let changed = total_changed_pixels > 0 && !tiles.is_empty();
+    let overall_bbox = if changed && min_x <= max_x && min_y <= max_y {
+        Some(DiffBBox {
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x + 1,
+            height: max_y - min_y + 1,
+        })
+    } else {
+        None
+    };
+
+    let changed_percent = if total_pixels > 0 {
+        ((total_changed_pixels as f64) / (total_pixels as f64) * 100.0 * 1000.0).round() / 1000.0
+    } else {
+        0.0
+    };
+
+    let changed_tiles_count = tiles.len();
+
+    TileDiffResult {
+        changed,
+        changed_pixels: total_changed_pixels,
+        total_pixels,
+        changed_percent,
+        tile_size: effective_tile_size,
+        changed_tiles_count,
+        tiles,
+        overall_bbox,
     }
 }
 
@@ -1117,5 +1296,57 @@ mod tests {
         let ring_px = rgba.get_pixel(66, 50);
         assert_ne!(ring_px, &image::Rgba([0, 0, 0, 255]));
         assert!(ring_px[0] > 100); // Amber has high red
+    }
+
+    #[test]
+    fn test_calculate_tile_diff_multi_region() {
+        let img1 = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            100,
+            100,
+            image::Rgba([128, 128, 128, 255]),
+        ));
+        let mut img2_rgba = RgbaImage::from_pixel(100, 100, image::Rgba([128, 128, 128, 255]));
+
+        // Modify 4x4 pixels at top-left (5, 5) inside tile (0, 0)
+        for y in 5..9 {
+            for x in 5..9 {
+                img2_rgba.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
+            }
+        }
+
+        // Modify 4x4 pixels at bottom-right (70, 70) inside tile (2, 2)
+        for y in 70..74 {
+            for x in 70..74 {
+                img2_rgba.put_pixel(x, y, image::Rgba([0, 255, 0, 255]));
+            }
+        }
+        let img2 = DynamicImage::ImageRgba8(img2_rgba);
+
+        // Tile size 32: canvas is 100x100 -> tiles: 0..32, 32..64, 64..96, 96..100
+        let tile_diff = calculate_tile_diff(&img2, &img1, 16, 32);
+        assert!(tile_diff.changed);
+        assert_eq!(tile_diff.changed_pixels, 32); // 16 + 16
+        assert_eq!(tile_diff.tiles.len(), 2);
+
+        // Verify tile 1 is at (0, 0)
+        assert_eq!(tile_diff.tiles[0].x, 0);
+        assert_eq!(tile_diff.tiles[0].y, 0);
+        assert_eq!(tile_diff.tiles[0].width, 32);
+        assert_eq!(tile_diff.tiles[0].height, 32);
+        assert_eq!(tile_diff.tiles[0].changed_pixels, 16);
+
+        // Verify tile 2 is at (64, 64)
+        assert_eq!(tile_diff.tiles[1].x, 64);
+        assert_eq!(tile_diff.tiles[1].y, 64);
+        assert_eq!(tile_diff.tiles[1].width, 32);
+        assert_eq!(tile_diff.tiles[1].height, 32);
+        assert_eq!(tile_diff.tiles[1].changed_pixels, 16);
+
+        // Overall bbox covers both tiles
+        let bbox = tile_diff.overall_bbox.expect("Overall bbox exists");
+        assert_eq!(bbox.x, 0);
+        assert_eq!(bbox.y, 0);
+        assert_eq!(bbox.width, 96);
+        assert_eq!(bbox.height, 96);
     }
 }

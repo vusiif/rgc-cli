@@ -227,7 +227,10 @@ pub fn compute_resource_fingerprint(uri: &str) -> Option<u64> {
     None
 }
 
-/// Compute a fast sample hash across the image buffer (dimensions + sampled pixels).
+/// Compute a robust grid-based sample hash across the image buffer (dimensions + 16x16 spatial tiles).
+///
+/// Divides the image canvas into a 16x16 grid of spatial blocks (256 tiles) to ensure comprehensive
+/// coverage across every quadrant, preventing local UI changes from escaping detection.
 fn hash_image_sample(img: &image::DynamicImage) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -238,12 +241,30 @@ fn hash_image_sample(img: &image::DynamicImage) -> u64 {
     h.hash(&mut hasher);
 
     let raw = img.as_bytes();
-    let step = (raw.len() / 512).max(1);
-    for chunk in raw.chunks(step) {
-        if let Some(&byte) = chunk.first() {
-            byte.hash(&mut hasher);
+    if w == 0 || h == 0 || raw.is_empty() {
+        return hasher.finish();
+    }
+
+    let channels = (raw.len() / (w as usize * h as usize)).max(1);
+    let stride = (w as usize) * channels;
+
+    let grid_x = 16.min(w as usize).max(1);
+    let grid_y = 16.min(h as usize).max(1);
+    let step_x = (w as usize) / grid_x;
+    let step_y = (h as usize) / grid_y;
+
+    for gy in 0..grid_y {
+        let y = gy * step_y + step_y / 2;
+        let row_start = y * stride;
+        for gx in 0..grid_x {
+            let x = gx * step_x + step_x / 2;
+            let px = row_start + x * channels;
+            if px + channels <= raw.len() {
+                raw[px..px + channels].hash(&mut hasher);
+            }
         }
     }
 
+    raw.len().hash(&mut hasher);
     hasher.finish()
 }

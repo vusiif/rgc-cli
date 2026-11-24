@@ -283,6 +283,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "window": {
                         "type": "string",
                         "description": "Optional window title or ID to search within."
+                    },
+                    "region": {
+                        "type": "string",
+                        "description": "Optional region of interest (ROI) in 'X,Y,WIDTH,HEIGHT' format to accelerate matching and constrain search scope."
                     }
                 },
                 "required": ["template"],
@@ -1281,8 +1285,19 @@ pub fn execute_find_template_tool(arguments: &serde_json::Value) -> ToolCallResu
     let img_w = rgba.width();
     let img_h = rgba.height();
 
-    let mut matches =
-        crate::template::find_template_matches(&rgba, &tpl_img, threshold, max_matches);
+    let roi = arguments
+        .get("region")
+        .or_else(|| arguments.get("roi"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<crate::cli::Region>().ok());
+
+    let mut matches = crate::template::find_template_matches_in_roi(
+        &rgba,
+        &tpl_img,
+        roi.as_ref(),
+        threshold,
+        max_matches,
+    );
     let transform = crate::coords::CoordinateTransform::new(
         origin,
         scale_factor,

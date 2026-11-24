@@ -159,6 +159,8 @@ pub struct SessionResponseJson {
     pub changed_percent: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bbox: Option<DiffBBox>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tiles: Option<Vec<crate::transform::DiffTile>>,
     pub width: u32,
     pub height: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -248,6 +250,14 @@ pub fn get_session_tool_definition() -> ToolDefinition {
                 "allowMissingMask": {
                     "type": "boolean",
                     "description": "Optional flag to permit capture if a configured mask window is not found."
+                },
+                "tiles": {
+                    "type": "boolean",
+                    "description": "Optional flag to decompose visual change detection into spatial grid tiles."
+                },
+                "tileSize": {
+                    "type": "integer",
+                    "description": "Spatial grid tile size in pixels (16-512, default: 64) when 'tiles' is enabled."
                 }
             },
             "additionalProperties": false
@@ -285,6 +295,17 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         .and_then(|v| v.as_u64())
         .unwrap_or(16)
         .clamp(1, 255) as u8;
+
+    let tiles_flag = arguments
+        .get("tiles")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let tile_size = arguments
+        .get("tileSize")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(64)
+        .clamp(16, 512) as u32;
 
     let monitor = arguments
         .get("monitor")
@@ -493,6 +514,7 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         changed_pixels,
         changed_percent,
         bbox,
+        detected_tiles,
         output_img,
         diff_crop_offset,
         is_diff_cropped,
@@ -505,6 +527,7 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
             0u64,
             0.0f64,
             None,
+            None,
             current_img.clone(),
             (0u32, 0u32),
             false,
@@ -515,6 +538,18 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
             let next_frame_idx = record.frame_index + 1;
 
             if diff.changed && (diff.changed_pixels >= 50 || diff.changed_percent >= 0.05) {
+                let tiles = if tiles_flag {
+                    let tile_res = output::calculate_tile_diff(
+                        &current_img,
+                        &record.last_image,
+                        threshold,
+                        tile_size,
+                    );
+                    Some(tile_res.tiles)
+                } else {
+                    None
+                };
+
                 let (out_img, crop_off, is_cropped) = if diff_only {
                     if let Some(ref b) = diff.bbox {
                         let padding = 8u32;
@@ -539,6 +574,7 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
                     diff.changed_pixels,
                     diff.changed_percent,
                     diff.bbox,
+                    tiles,
                     out_img,
                     crop_off,
                     is_cropped,
@@ -552,6 +588,7 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
                     false,
                     diff.changed_pixels,
                     diff.changed_percent,
+                    None,
                     None,
                     current_img,
                     (0u32, 0u32),
@@ -589,6 +626,7 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         changed_pixels,
         changed_percent,
         bbox,
+        tiles: detected_tiles,
         width: output_img.width(),
         height: output_img.height(),
         coordinates: Some(final_transform.to_info()),
@@ -801,6 +839,8 @@ mod tests {
         assert!(props.get("maskWindows").is_some());
         assert!(props.get("excludeWindows").is_some());
         assert!(props.get("allowMissingMask").is_some());
+        assert!(props.get("tiles").is_some());
+        assert!(props.get("tileSize").is_some());
     }
 
     #[test]
