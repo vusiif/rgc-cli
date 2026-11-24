@@ -5,6 +5,36 @@ All notable changes to `rgc-cli` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.0] - 2026-11-24
+
+### Security & Privacy
+- **High-DPI Privacy Redaction Mapping**:
+  - Introduced `scale_factor` to `resolve_window_mask_bounds` in `src/capture/redaction.rs`, mapping logical window coordinates to physical canvas space and eliminating the 75% unmasked sensitive window leak on High-DPI / 4K displays.
+- **Decompression Bomb DoS Defense**:
+  - Hardened `load_untrusted_image_input` in `src/mcp/tools.rs` with `image::Limits` (16384x16384 max dimension, 256MB max memory allocation) to abort malicious decompression before allocating memory.
+  - Hardened Base64 detection heuristics with `!trimmed.contains('.')` to prevent local file paths from being misidentified as Base64 strings.
+
+### Fixed & Hardened
+- **Accessibility Coordinate Calibration**:
+  - Corrected screen bounds calculation for Accessibility semantic queries in `src/pipeline.rs` from multiplying by `scale_factor` to dividing by `scale`, restoring alignment with the desktop logical coordinate space.
+- **Stateful SessionManager LRU Eviction**:
+  - Decoupled TTL pruning from capacity limits in `src/mcp/session.rs`. Calling `get()` refreshes access timestamps and never evicts active sessions; updating existing keys replaces records in place without evicting other sessions.
+- **Multi-Monitor Mixed DPI Window Geometry**:
+  - Implemented `find_best_monitor_scale_factor` using 2D intersection area (overlap) matching in `src/capture/window.rs`, eliminating miscalculated window DPI and improper titlebar trimming when capturing windows on secondary monitors.
+- **Streaming WebP Chunk Validation**:
+  - Hardened `extract_frame_subchunks` in `src/output.rs` with integer overflow protection (`checked_add`), forward progression checks, and trailing metadata chunk stripping (EXIF/XMP/ICCP) to avoid corrupting `ANMF` frame payloads.
+- **MCP Recording Fail-Fast**:
+  - Added pre-flight destination directory existence and writability validation to `execute_record_tool`, failing immediately rather than after completing a multi-second recording.
+
+### Performance & Architecture
+- **Zero-Copy Recording Frame Pipeline**:
+  - Eliminated redundant 33MB full-canvas RGBA buffer cloning in `process_recording_frame` using `std::mem::take`, saving ~1.65 GB heap allocation per 5-second recording.
+- **Unified Capture Dispatch & Visual Change Polling**:
+  - Introduced `CaptureTarget`, `UnifiedCaptured`, and `capture_unified` in `src/capture/dispatch.rs`, eliminating repetitive dispatch implementations across CLI and MCP endpoints.
+  - Centralized visual change detection into `wait_for_visual_change`.
+
+---
+
 ## [2.11.1] - 2026-11-23
 
 ### Fixed
