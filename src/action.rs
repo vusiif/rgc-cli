@@ -449,10 +449,16 @@ pub fn verify_action_change(
             let bp = b_cow.get_pixel(x, y);
             let ap = a_cow.get_pixel(x, y);
 
-            let is_diff = bp[0].abs_diff(ap[0]) > threshold
-                || bp[1].abs_diff(ap[1]) > threshold
-                || bp[2].abs_diff(ap[2]) > threshold
-                || bp[3].abs_diff(ap[3]) > threshold;
+            let is_diff = if threshold == 0 {
+                bp != ap
+            } else if bp == ap {
+                false
+            } else {
+                bp[0].abs_diff(ap[0]) > threshold
+                    || bp[1].abs_diff(ap[1]) > threshold
+                    || bp[2].abs_diff(ap[2]) > threshold
+                    || bp[3].abs_diff(ap[3]) > threshold
+            };
 
             if is_diff {
                 changed_pixels += 1;

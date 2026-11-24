@@ -48,9 +48,17 @@ pub fn get_verify_action_tool_definition() -> ToolDefinition {
                     "type": "string",
                     "description": "Optional window ID or title substring to capture."
                 },
+                "clientOnly": {
+                    "type": "boolean",
+                    "description": "Optional flag when capturing a window to trim outer drop shadows and titlebars, returning only the application client/working area."
+                },
                 "allMonitors": {
                     "type": "boolean",
                     "description": "Optional flag to capture multi-monitor desktop panorama."
+                },
+                "cropToRoi": {
+                    "type": "boolean",
+                    "description": "Optional flag to crop the returned annotated image to the ROI bounding box around (x, y) (drastically reduces image payload and token size for AI agents)."
                 },
                 "outputPath": {
                     "type": "string",
@@ -70,21 +78,29 @@ pub fn get_verify_action_tool_definition() -> ToolDefinition {
 fn capture_single_target(
     monitor: Option<usize>,
     window_query: Option<&str>,
+    client_only: bool,
     all_monitors: bool,
 ) -> Result<image::DynamicImage, String> {
-    if all_monitors {
-        capture::capture_all_monitors_with_details(None, CoordMode::Logical)
-            .map(|c| c.image)
-            .map_err(|e| format!("Panorama capture failed: {e}"))
+    let target = if all_monitors {
+        capture::CaptureTarget::AllMonitors
     } else if let Some(win) = window_query {
-        capture::capture_window_with_details(win, None)
-            .map(|c| c.image)
-            .map_err(|e| format!("Window capture failed: {e}"))
+        capture::CaptureTarget::Window {
+            query: win,
+            client_only,
+        }
     } else {
-        capture::capture_screen_with_details(monitor, None, CoordMode::Logical)
-            .map(|c| c.image)
-            .map_err(|e| format!("Screen capture failed: {e}"))
-    }
+        capture::CaptureTarget::Monitor { index: monitor }
+    };
+
+    let err_prefix = match target {
+        capture::CaptureTarget::Window { .. } => "Window capture failed",
+        capture::CaptureTarget::AllMonitors => "Panorama capture failed",
+        capture::CaptureTarget::Monitor { .. } => "Screen capture failed",
+    };
+
+    capture::capture_unified(target, None, CoordMode::Logical)
+        .map(|c| c.image)
+        .map_err(|e| format!("{err_prefix}: {e}"))
 }
 
 /// Execute the `verify_action` MCP tool.
@@ -139,6 +155,14 @@ pub fn execute_verify_action_tool(arguments: &serde_json::Value) -> ToolCallResu
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let window_query = arguments.get("window").and_then(|v| v.as_str());
+    let client_only = arguments
+        .get("clientOnly")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let crop_to_roi = arguments
+        .get("cropToRoi")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let allow_overwrite = arguments
         .get("allowOverwrite")
@@ -169,7 +193,7 @@ pub fn execute_verify_action_tool(arguments: &serde_json::Value) -> ToolCallResu
         .unwrap_or(output_path.is_none());
 
     // 1. Capture baseline frame
-    let before_img = match capture_single_target(monitor, window_query, all_monitors) {
+    let before_img = match capture_single_target(monitor, window_query, client_only, all_monitors) {
         Ok(img) => img,
         Err(e) => {
             return ToolCallResult {
@@ -183,7 +207,7 @@ pub fn execute_verify_action_tool(arguments: &serde_json::Value) -> ToolCallResu
     sleep(Duration::from_millis(timeout_ms));
 
     // 3. Capture follow-up frame
-    let after_img = match capture_single_target(monitor, window_query, all_monitors) {
+    let after_img = match capture_single_target(monitor, window_query, client_only, all_monitors) {
         Ok(img) => img,
         Err(e) => {
             return ToolCallResult {
@@ -203,10 +227,33 @@ pub fn execute_verify_action_tool(arguments: &serde_json::Value) -> ToolCallResu
         threshold,
     );
 
-    // 5. Draw visual click marker at target on the follow-up image
+    // 5. Draw visual click marker at target on the follow-up image (optionally cropped to ROI)
+    let (final_base_img, click_x, click_y) = if crop_to_roi && radius > 0 {
+        let w = after_img.width();
+        let h = after_img.height();
+        let padding = 16u32;
+        let crop_x = target_x.saturating_sub(radius + padding).min(w);
+        let crop_y = target_y.saturating_sub(radius + padding).min(h);
+        let crop_w = (radius * 2 + padding * 2).min(w.saturating_sub(crop_x));
+        let crop_h = (radius * 2 + padding * 2).min(h.saturating_sub(crop_y));
+
+        if crop_w > 0 && crop_h > 0 {
+            let cropped = after_img.crop_imm(crop_x, crop_y, crop_w, crop_h);
+            (
+                cropped,
+                target_x.saturating_sub(crop_x),
+                target_y.saturating_sub(crop_y),
+            )
+        } else {
+            (after_img, target_x, target_y)
+        }
+    } else {
+        (after_img, target_x, target_y)
+    };
+
     let click_marker = ClickMarker {
-        x: target_x,
-        y: target_y,
+        x: click_x,
+        y: click_y,
         label: Some(
             if verification.verified {
                 "ACTION OK"
@@ -217,7 +264,7 @@ pub fn execute_verify_action_tool(arguments: &serde_json::Value) -> ToolCallResu
         ),
     };
 
-    let annotated_img = action::draw_action_overlays(after_img, &[click_marker], &[]);
+    let annotated_img = action::draw_action_overlays(final_base_img, &[click_marker], &[]);
 
     // 6. Handle output file saving if requested
     if let Some(ref out_p) = output_path {

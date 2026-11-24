@@ -687,6 +687,14 @@ pub fn extract_frame_subchunks(bytes: &[u8]) -> Option<&[u8]> {
 }
 
 /// A streaming WebP animation encoder that encodes and flushes frames incrementally using RIFF WebP chunks.
+struct PendingWebpFrame {
+    w: u32,
+    h: u32,
+    duration_ms: u32,
+    subchunks: Vec<u8>,
+}
+
+/// A streaming WebP animation encoder that encodes and flushes frames incrementally using RIFF WebP chunks.
 /// Delivers full truecolor (24-bit + 8-bit alpha) recording with dramatically better compression and quality than GIF.
 pub struct WebpStreamEncoder<W: std::io::Write + std::io::Seek> {
     writer: W,
@@ -695,6 +703,8 @@ pub struct WebpStreamEncoder<W: std::io::Write + std::io::Seek> {
     dimensions: Option<(u32, u32)>,
     total_bytes: u64,
     finished: bool,
+    prev_raw: Vec<u8>,
+    pending_frame: Option<PendingWebpFrame>,
 }
 
 impl<W: std::io::Write + std::io::Seek> WebpStreamEncoder<W> {
@@ -712,10 +722,97 @@ impl<W: std::io::Write + std::io::Seek> WebpStreamEncoder<W> {
             dimensions: None,
             total_bytes: 12,
             finished: false,
+            prev_raw: Vec::new(),
+            pending_frame: None,
         })
     }
 
+    fn write_header(&mut self, w: u32, h: u32) -> Result<(), OutputError> {
+        // 1. Write VP8X chunk (18 bytes total)
+        let mut vp8x = Vec::with_capacity(18);
+        vp8x.extend_from_slice(b"VP8X");
+        vp8x.extend_from_slice(&10u32.to_le_bytes());
+        vp8x.extend_from_slice(&[0x12, 0x00, 0x00, 0x00]); // Animation flag (0x02) | Alpha flag (0x10)
+        let w_minus_1 = w.saturating_sub(1);
+        let h_minus_1 = h.saturating_sub(1);
+        vp8x.push((w_minus_1 & 0xFF) as u8);
+        vp8x.push(((w_minus_1 >> 8) & 0xFF) as u8);
+        vp8x.push(((w_minus_1 >> 16) & 0xFF) as u8);
+        vp8x.push((h_minus_1 & 0xFF) as u8);
+        vp8x.push(((h_minus_1 >> 8) & 0xFF) as u8);
+        vp8x.push(((h_minus_1 >> 16) & 0xFF) as u8);
+
+        self.writer
+            .write_all(&vp8x)
+            .map_err(OutputError::StdoutIoFailed)?;
+        self.total_bytes += vp8x.len() as u64;
+
+        // 2. Write ANIM chunk (14 bytes total)
+        let mut anim = Vec::with_capacity(14);
+        anim.extend_from_slice(b"ANIM");
+        anim.extend_from_slice(&6u32.to_le_bytes());
+        anim.extend_from_slice(&[0, 0, 0, 0]); // Background color BGRA: black transparent
+        anim.extend_from_slice(&0u16.to_le_bytes()); // Loop count: 0 = infinite
+
+        self.writer
+            .write_all(&anim)
+            .map_err(OutputError::StdoutIoFailed)?;
+        self.total_bytes += anim.len() as u64;
+        Ok(())
+    }
+
+    fn flush_pending_frame(&mut self) -> Result<(), OutputError> {
+        if let Some(pending) = self.pending_frame.take() {
+            let payload_size = 16 + pending.subchunks.len();
+            let mut anmf = Vec::with_capacity(8 + payload_size + 1);
+            anmf.extend_from_slice(b"ANMF");
+            anmf.extend_from_slice(&(payload_size as u32).to_le_bytes());
+
+            // Frame X (3 bytes, 24-bit little endian, X / 2) -> 0
+            anmf.extend_from_slice(&[0, 0, 0]);
+            // Frame Y (3 bytes, 24-bit little endian, Y / 2) -> 0
+            anmf.extend_from_slice(&[0, 0, 0]);
+
+            // Frame Width - 1 (3 bytes)
+            let w_minus_1 = pending.w.saturating_sub(1);
+            anmf.push((w_minus_1 & 0xFF) as u8);
+            anmf.push(((w_minus_1 >> 8) & 0xFF) as u8);
+            anmf.push(((w_minus_1 >> 16) & 0xFF) as u8);
+
+            // Frame Height - 1 (3 bytes)
+            let h_minus_1 = pending.h.saturating_sub(1);
+            anmf.push((h_minus_1 & 0xFF) as u8);
+            anmf.push(((h_minus_1 >> 8) & 0xFF) as u8);
+            anmf.push(((h_minus_1 >> 16) & 0xFF) as u8);
+
+            // Frame Duration in ms (3 bytes, uint24 little endian, max 16,777,215 ms)
+            let duration = pending.duration_ms.min(0x00FF_FFFF);
+            anmf.push((duration & 0xFF) as u8);
+            anmf.push(((duration >> 8) & 0xFF) as u8);
+            anmf.push(((duration >> 16) & 0xFF) as u8);
+
+            // Flags (1 byte): bit 1 = Blending (1 = Overwrite / Do not blend), bit 0 = Disposal (0 = Do not dispose)
+            anmf.push(0x02);
+
+            // Append subchunks payload
+            anmf.extend_from_slice(&pending.subchunks);
+
+            // RIFF 2-byte alignment padding
+            if payload_size % 2 != 0 {
+                anmf.push(0);
+            }
+
+            self.writer
+                .write_all(&anmf)
+                .map_err(OutputError::StdoutIoFailed)?;
+            self.total_bytes += anmf.len() as u64;
+        }
+        Ok(())
+    }
+
     /// Encode a single RGBA frame immediately into the streaming WebP animation container.
+    /// Incorporates inter-frame temporal compaction: consecutive identical frames accumulate
+    /// duration into the pending ANMF chunk without re-running expensive lossless compression.
     pub fn encode_frame(&mut self, rgba: &image::RgbaImage) -> Result<(), OutputError> {
         let (w, h) = (rgba.width(), rgba.height());
         if w == 0 || h == 0 {
@@ -735,40 +832,31 @@ impl<W: std::io::Write + std::io::Seek> WebpStreamEncoder<W> {
             }
         } else {
             self.dimensions = Some((w, h));
-
-            // 1. Write VP8X chunk (18 bytes total)
-            let mut vp8x = Vec::with_capacity(18);
-            vp8x.extend_from_slice(b"VP8X");
-            vp8x.extend_from_slice(&10u32.to_le_bytes());
-            vp8x.extend_from_slice(&[0x12, 0x00, 0x00, 0x00]); // Animation flag (0x02) | Alpha flag (0x10)
-            let w_minus_1 = w.saturating_sub(1);
-            let h_minus_1 = h.saturating_sub(1);
-            vp8x.push((w_minus_1 & 0xFF) as u8);
-            vp8x.push(((w_minus_1 >> 8) & 0xFF) as u8);
-            vp8x.push(((w_minus_1 >> 16) & 0xFF) as u8);
-            vp8x.push((h_minus_1 & 0xFF) as u8);
-            vp8x.push(((h_minus_1 >> 8) & 0xFF) as u8);
-            vp8x.push(((h_minus_1 >> 16) & 0xFF) as u8);
-
-            self.writer
-                .write_all(&vp8x)
-                .map_err(OutputError::StdoutIoFailed)?;
-            self.total_bytes += vp8x.len() as u64;
-
-            // 2. Write ANIM chunk (14 bytes total)
-            let mut anim = Vec::with_capacity(14);
-            anim.extend_from_slice(b"ANIM");
-            anim.extend_from_slice(&6u32.to_le_bytes());
-            anim.extend_from_slice(&[0, 0, 0, 0]); // Background color BGRA: black transparent
-            anim.extend_from_slice(&0u16.to_le_bytes()); // Loop count: 0 = infinite
-
-            self.writer
-                .write_all(&anim)
-                .map_err(OutputError::StdoutIoFailed)?;
-            self.total_bytes += anim.len() as u64;
+            self.write_header(w, h)?;
         }
 
-        // 3. Encode single frame RGBA into temporary WebP buffer
+        let delay_ms = (1000 / self.fps).max(10);
+
+        // Inter-frame temporal deduplication:
+        // If the new frame matches the previously encoded frame exactly, accumulate duration
+        // onto the pending frame without re-encoding through lossless WebP compression.
+        if let Some(ref mut pending) = self.pending_frame {
+            if (w, h) == (pending.w, pending.h)
+                && self.prev_raw.as_slice() == rgba.as_raw().as_slice()
+            {
+                const MAX_WEBP_DURATION: u32 = 0x00FF_FFFF;
+                if (pending.duration_ms as u64) + (delay_ms as u64) <= (MAX_WEBP_DURATION as u64) {
+                    pending.duration_ms += delay_ms;
+                    self.frame_count += 1;
+                    return Ok(());
+                }
+            }
+        }
+
+        // Flush any pending frame before encoding the new distinct frame
+        self.flush_pending_frame()?;
+
+        // Encode single frame RGBA into temporary WebP buffer
         let mut single_buf = std::io::Cursor::new(Vec::new());
         let encoder = image::codecs::webp::WebPEncoder::new_lossless(&mut single_buf);
         encoder
@@ -787,50 +875,14 @@ impl<W: std::io::Write + std::io::Seek> WebpStreamEncoder<W> {
                 )),
             })?;
 
-        // 4. Wrap into ANMF chunk
-        let payload_size = 16 + subchunks.len();
-        let mut anmf = Vec::with_capacity(8 + payload_size + 1);
-        anmf.extend_from_slice(b"ANMF");
-        anmf.extend_from_slice(&(payload_size as u32).to_le_bytes());
-
-        // Frame X (3 bytes, 24-bit little endian, X / 2) -> 0
-        anmf.extend_from_slice(&[0, 0, 0]);
-        // Frame Y (3 bytes, 24-bit little endian, Y / 2) -> 0
-        anmf.extend_from_slice(&[0, 0, 0]);
-
-        // Frame Width - 1 (3 bytes)
-        let w_minus_1 = w.saturating_sub(1);
-        anmf.push((w_minus_1 & 0xFF) as u8);
-        anmf.push(((w_minus_1 >> 8) & 0xFF) as u8);
-        anmf.push(((w_minus_1 >> 16) & 0xFF) as u8);
-
-        // Frame Height - 1 (3 bytes)
-        let h_minus_1 = h.saturating_sub(1);
-        anmf.push((h_minus_1 & 0xFF) as u8);
-        anmf.push(((h_minus_1 >> 8) & 0xFF) as u8);
-        anmf.push(((h_minus_1 >> 16) & 0xFF) as u8);
-
-        // Frame Duration in ms (3 bytes, uint24 little endian)
-        let delay_ms = (1000 / self.fps).max(10);
-        anmf.push((delay_ms & 0xFF) as u8);
-        anmf.push(((delay_ms >> 8) & 0xFF) as u8);
-        anmf.push(((delay_ms >> 16) & 0xFF) as u8);
-
-        // Flags (1 byte): bit 1 = Blending (1 = Overwrite / Do not blend), bit 0 = Disposal (0 = Do not dispose)
-        anmf.push(0x02);
-
-        // Append subchunks payload
-        anmf.extend_from_slice(subchunks);
-
-        // RIFF 2-byte alignment padding
-        if payload_size % 2 != 0 {
-            anmf.push(0);
-        }
-
-        self.writer
-            .write_all(&anmf)
-            .map_err(OutputError::StdoutIoFailed)?;
-        self.total_bytes += anmf.len() as u64;
+        self.prev_raw.clear();
+        self.prev_raw.extend_from_slice(rgba.as_raw());
+        self.pending_frame = Some(PendingWebpFrame {
+            w,
+            h,
+            duration_ms: delay_ms,
+            subchunks: subchunks.to_vec(),
+        });
         self.frame_count += 1;
         Ok(())
     }
@@ -840,6 +892,8 @@ impl<W: std::io::Write + std::io::Seek> WebpStreamEncoder<W> {
         if self.finished || self.frame_count == 0 {
             return Ok(());
         }
+        self.flush_pending_frame()?;
+
         let riff_size = (self.total_bytes.saturating_sub(8)) as u32;
         self.writer
             .seek(std::io::SeekFrom::Start(4))
@@ -1113,6 +1167,57 @@ mod tests {
         assert!(res.is_ok());
         assert!(target.exists());
         let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn test_webp_temporal_compaction_deduplication() {
+        use std::io::Cursor;
+        let mut buffer = Cursor::new(Vec::new());
+        {
+            let mut stream = WebpStreamEncoder::new(&mut buffer, 10).unwrap(); // 100ms per frame
+            let static_frame = RgbaImage::from_pixel(16, 16, Rgba([200, 50, 100, 255]));
+
+            // Encode 5 identical frames
+            for _ in 0..5 {
+                stream.encode_frame(&static_frame).unwrap();
+            }
+
+            assert_eq!(stream.frame_count(), 5);
+            stream.finish().unwrap();
+        }
+
+        let bytes = buffer.into_inner();
+        // Count occurrences of ANMF chunk header
+        let anmf_count = bytes.windows(4).filter(|w| *w == *b"ANMF").count();
+        // 5 identical frames should be temporally compacted into exactly 1 ANMF chunk
+        assert_eq!(anmf_count, 1);
+
+        // Find the ANMF chunk and verify the accumulated duration (5 * 100ms = 500ms)
+        let anmf_pos = bytes.windows(4).position(|w| *w == *b"ANMF").unwrap();
+        // Duration uint24 LE is located at offset: anmf_pos + 8 (header) + 12 (frame X, Y, W, H) = +20
+        let dur_bytes = &bytes[anmf_pos + 20..anmf_pos + 23];
+        let accumulated_dur =
+            dur_bytes[0] as u32 | ((dur_bytes[1] as u32) << 8) | ((dur_bytes[2] as u32) << 16);
+        assert_eq!(accumulated_dur, 500);
+
+        // Verify mixed sequence: 2 identical red frames, followed by 1 blue frame
+        let mut mixed_buf = Cursor::new(Vec::new());
+        {
+            let mut stream = WebpStreamEncoder::new(&mut mixed_buf, 10).unwrap();
+            let red_frame = RgbaImage::from_pixel(16, 16, Rgba([255, 0, 0, 255]));
+            let blue_frame = RgbaImage::from_pixel(16, 16, Rgba([0, 0, 255, 255]));
+
+            stream.encode_frame(&red_frame).unwrap();
+            stream.encode_frame(&red_frame).unwrap();
+            stream.encode_frame(&blue_frame).unwrap();
+
+            assert_eq!(stream.frame_count(), 3);
+            stream.finish().unwrap();
+        }
+        let mixed_bytes = mixed_buf.into_inner();
+        let mixed_anmf_count = mixed_bytes.windows(4).filter(|w| *w == *b"ANMF").count();
+        // Exactly 2 chunks: one compacted red (200ms) and one blue (100ms)
+        assert_eq!(mixed_anmf_count, 2);
     }
 
     #[test]

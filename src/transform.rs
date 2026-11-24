@@ -446,29 +446,59 @@ pub fn calculate_image_diff(
         let ref_raw = ref_cow.as_raw();
         let stride = (cw as usize) * 4;
 
-        for y in 0..ch {
-            let row_offset = (y as usize) * stride;
-            let c_row = &curr_raw[row_offset..row_offset + stride];
-            let r_row = &ref_raw[row_offset..row_offset + stride];
+        if threshold == 0 {
+            for y in 0..ch {
+                let row_offset = (y as usize) * stride;
+                let c_row = &curr_raw[row_offset..row_offset + stride];
+                let r_row = &ref_raw[row_offset..row_offset + stride];
 
-            if c_row == r_row {
-                continue;
+                if c_row == r_row {
+                    continue;
+                }
+
+                for (x_usize, (cp, rp)) in
+                    c_row.chunks_exact(4).zip(r_row.chunks_exact(4)).enumerate()
+                {
+                    if cp != rp {
+                        let x = x_usize as u32;
+                        changed_pixels += 1;
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                        min_y = min_y.min(y);
+                        max_y = max_y.max(y);
+                    }
+                }
             }
+        } else {
+            for y in 0..ch {
+                let row_offset = (y as usize) * stride;
+                let c_row = &curr_raw[row_offset..row_offset + stride];
+                let r_row = &ref_raw[row_offset..row_offset + stride];
 
-            for (x_usize, (cp, rp)) in c_row.chunks_exact(4).zip(r_row.chunks_exact(4)).enumerate()
-            {
-                let is_diff = cp[0].abs_diff(rp[0]) > threshold
-                    || cp[1].abs_diff(rp[1]) > threshold
-                    || cp[2].abs_diff(rp[2]) > threshold
-                    || cp[3].abs_diff(rp[3]) > threshold;
+                if c_row == r_row {
+                    continue;
+                }
 
-                if is_diff {
-                    let x = x_usize as u32;
-                    changed_pixels += 1;
-                    min_x = min_x.min(x);
-                    max_x = max_x.max(x);
-                    min_y = min_y.min(y);
-                    max_y = max_y.max(y);
+                for (x_usize, (cp, rp)) in
+                    c_row.chunks_exact(4).zip(r_row.chunks_exact(4)).enumerate()
+                {
+                    if cp == rp {
+                        continue;
+                    }
+
+                    let is_diff = cp[0].abs_diff(rp[0]) > threshold
+                        || cp[1].abs_diff(rp[1]) > threshold
+                        || cp[2].abs_diff(rp[2]) > threshold
+                        || cp[3].abs_diff(rp[3]) > threshold;
+
+                    if is_diff {
+                        let x = x_usize as u32;
+                        changed_pixels += 1;
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                        min_y = min_y.min(y);
+                        max_y = max_y.max(y);
+                    }
                 }
             }
         }
@@ -478,7 +508,11 @@ pub fn calculate_image_diff(
                 let is_diff = if x < rw && y < rh {
                     let cp = curr_cow.get_pixel(x, y);
                     let rp = ref_cow.get_pixel(x, y);
-                    (0..4).any(|c| cp[c].abs_diff(rp[c]) > threshold)
+                    if threshold == 0 {
+                        cp != rp
+                    } else {
+                        cp != rp && (0..4).any(|c| cp[c].abs_diff(rp[c]) > threshold)
+                    }
                 } else {
                     true
                 };
@@ -897,6 +931,39 @@ mod tests {
         assert_eq!(diff.total_pixels, 10000);
         assert_eq!(diff.changed_percent, 0.0);
         assert_eq!(diff.bbox, None);
+    }
+
+    #[test]
+    fn test_calculate_image_diff_zero_and_nonzero_threshold() {
+        let img1 = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            10,
+            10,
+            image::Rgba([100, 100, 100, 255]),
+        ));
+        let mut img2_rgba = RgbaImage::from_pixel(10, 10, image::Rgba([100, 100, 100, 255]));
+        // 1 pixel difference with delta = 2
+        img2_rgba.put_pixel(5, 5, image::Rgba([102, 100, 100, 255]));
+        let img2 = DynamicImage::ImageRgba8(img2_rgba);
+
+        // threshold = 0 should detect the 1 pixel difference
+        let diff_zero = calculate_image_diff(&img1, &img2, 0);
+        assert!(diff_zero.changed);
+        assert_eq!(diff_zero.changed_pixels, 1);
+        assert_eq!(
+            diff_zero.bbox,
+            Some(DiffBBox {
+                x: 5,
+                y: 5,
+                width: 1,
+                height: 1
+            })
+        );
+
+        // threshold = 5 should ignore difference of delta 2
+        let diff_five = calculate_image_diff(&img1, &img2, 5);
+        assert!(!diff_five.changed);
+        assert_eq!(diff_five.changed_pixels, 0);
+        assert_eq!(diff_five.bbox, None);
     }
 
     #[test]

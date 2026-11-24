@@ -95,6 +95,44 @@ pub fn get_record_tool_definition() -> ToolDefinition {
     }
 }
 
+enum RecordWriter {
+    Memory(std::io::Cursor<Vec<u8>>),
+    File {
+        writer: std::io::BufWriter<std::fs::File>,
+    },
+}
+
+impl std::io::Write for RecordWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            RecordWriter::Memory(c) => c.write(buf),
+            RecordWriter::File { writer } => writer.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            RecordWriter::Memory(c) => c.flush(),
+            RecordWriter::File { writer } => writer.flush(),
+        }
+    }
+}
+
+impl std::io::Seek for RecordWriter {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        match self {
+            RecordWriter::Memory(c) => c.seek(pos),
+            RecordWriter::File { writer } => writer.seek(pos),
+        }
+    }
+}
+
+fn cleanup_temp_file(path: Option<&std::path::Path>) {
+    if let Some(p) = path {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// Execute the `record_screen` MCP tool, sampling consecutive frames and encoding them as an animated GIF.
 pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let duration_secs = match arguments.get("durationSecs").and_then(|v| v.as_f64()) {
@@ -264,11 +302,45 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let target_duration = std::time::Duration::from_secs_f32(duration_secs);
     let start_time = std::time::Instant::now();
 
-    let mut anim_buffer = std::io::Cursor::new(Vec::new());
+    let temp_file_path = if let Some(ref p) = output_path {
+        if !return_base64 {
+            let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let temp_name = format!(
+                ".tmp_rec_{}_{}.tmp",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            );
+            Some(parent.join(temp_name))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut record_writer = if let Some(ref temp_path) = temp_file_path {
+        match std::fs::File::create(temp_path) {
+            Ok(file) => RecordWriter::File {
+                writer: std::io::BufWriter::with_capacity(128 * 1024, file),
+            },
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Failed to create temporary recording file: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+        }
+    } else {
+        RecordWriter::Memory(std::io::Cursor::new(Vec::new()))
+    };
+
     let mut stream = if is_webp {
-        match output::WebpStreamEncoder::new(&mut anim_buffer, fps) {
+        match output::WebpStreamEncoder::new(&mut record_writer, fps) {
             Ok(s) => output::RecordingStreamEncoder::Webp(s),
             Err(e) => {
+                cleanup_temp_file(temp_file_path.as_deref());
                 return ToolCallResult {
                     content: vec![ToolContent::Text {
                         text: format!("Failed to initialize streaming WebP encoder: {e}"),
@@ -278,9 +350,10 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
             }
         }
     } else {
-        match output::GifStreamEncoder::new(&mut anim_buffer, fps) {
+        match output::GifStreamEncoder::new(&mut record_writer, fps) {
             Ok(s) => output::RecordingStreamEncoder::Gif(s),
             Err(e) => {
+                cleanup_temp_file(temp_file_path.as_deref());
                 return ToolCallResult {
                     content: vec![ToolContent::Text {
                         text: format!("Failed to initialize streaming GIF encoder: {e}"),
@@ -327,6 +400,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         let c = match captured {
             Ok(c) => c,
             Err(e) => {
+                cleanup_temp_file(temp_file_path.as_deref());
                 return ToolCallResult {
                     content: vec![ToolContent::Text {
                         text: format!("Recording frame capture failed: {e}"),
@@ -351,6 +425,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         ) {
             Ok(img) => img,
             Err(e) => {
+                cleanup_temp_file(temp_file_path.as_deref());
                 return ToolCallResult {
                     content: vec![ToolContent::Text {
                         text: format!("Privacy redaction failed in recording: {}", e.message),
@@ -362,6 +437,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         let rgba = frame_img.into_rgba8();
 
         if let Err(e) = stream.encode_frame(&rgba) {
+            cleanup_temp_file(temp_file_path.as_deref());
             return ToolCallResult {
                 content: vec![ToolContent::Text {
                     text: format!("Failed to encode streaming frame: {e}"),
@@ -383,6 +459,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     }
 
     if stream.frame_count() == 0 {
+        cleanup_temp_file(temp_file_path.as_deref());
         return ToolCallResult {
             content: vec![ToolContent::Text {
                 text: "No frames captured during recording.".to_string(),
@@ -394,6 +471,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let frame_count = stream.frame_count() as usize;
     let (width, height) = stream.dimensions().unwrap_or((0, 0));
     if let Err(e) = stream.finish() {
+        cleanup_temp_file(temp_file_path.as_deref());
         return ToolCallResult {
             content: vec![ToolContent::Text {
                 text: format!("Failed to finalize animation container: {e}"),
@@ -403,87 +481,150 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     }
     drop(stream);
 
-    let anim_bytes = anim_buffer.into_inner();
+    let (total_size, anim_bytes) = match record_writer {
+        RecordWriter::File { mut writer } => {
+            use std::io::Write;
+            let temp_path = temp_file_path.as_deref().unwrap();
+            if let Err(e) = writer.flush() {
+                cleanup_temp_file(Some(temp_path));
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Failed to flush recorded temporary file: {e}"),
+                    }],
+                    is_error: true,
+                };
+            }
+            drop(writer);
 
-    // Memory circuit breaker: prevent unbounded buffer payloads
-    if anim_bytes.len() > 100 * 1024 * 1024 {
-        return ToolCallResult {
-            content: vec![ToolContent::Text {
-                text: format!(
-                    "Recorded animation size ({} MB) exceeds maximum allowed payload limit (100MB). Reduce duration or FPS.",
-                    anim_bytes.len() / (1024 * 1024)
-                ),
-            }],
-            is_error: true,
-        };
-    }
-
-    if let Some(ref p) = output_path {
-        if !allow_overwrite && p.exists() {
-            return ToolCallResult {
-                content: vec![ToolContent::Text {
-                    text: format!(
-                        "Target file already exists: '{}'. Set allowOverwrite=true to permit overwriting.",
-                        p.display()
-                    ),
-                }],
-                is_error: true,
+            let file_size = match std::fs::metadata(temp_path) {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    cleanup_temp_file(Some(temp_path));
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!("Failed to read recorded temporary file metadata: {e}"),
+                        }],
+                        is_error: true,
+                    };
+                }
             };
-        }
 
-        let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            let _ = std::fs::create_dir_all(parent);
-        }
+            if file_size > 100 * 1024 * 1024 {
+                cleanup_temp_file(Some(temp_path));
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!(
+                            "Recorded animation size ({} MB) exceeds maximum allowed payload limit (100MB). Reduce duration or FPS.",
+                            file_size / (1024 * 1024)
+                        ),
+                    }],
+                    is_error: true,
+                };
+            }
 
-        let temp_name = format!(
-            ".tmp_rec_{}_{}.tmp",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        );
-        let temp_path = parent.join(temp_name);
+            let p = output_path.as_ref().unwrap();
+            let rename_res = std::fs::rename(temp_path, p).or_else(|_| {
+                std::fs::copy(temp_path, p).map(|_| {
+                    cleanup_temp_file(Some(temp_path));
+                })
+            });
 
-        let write_res = std::fs::write(&temp_path, &anim_bytes);
-        if let Err(e) = write_res {
-            let _ = std::fs::remove_file(&temp_path);
-            let label = if is_webp { "WebP" } else { "GIF" };
-            return ToolCallResult {
-                content: vec![ToolContent::Text {
-                    text: format!("Failed to write recorded {label} to temporary file: {e}"),
-                }],
-                is_error: true,
-            };
-        }
-
-        if let Err(_rename_err) = std::fs::rename(&temp_path, p) {
-            if let Err(copy_err) = std::fs::copy(&temp_path, p) {
-                let _ = std::fs::remove_file(&temp_path);
+            if let Err(e) = rename_res {
+                cleanup_temp_file(Some(temp_path));
                 let label = if is_webp { "WebP" } else { "GIF" };
                 return ToolCallResult {
                     content: vec![ToolContent::Text {
                         text: format!(
-                            "Failed to commit recorded {label} to '{}': {copy_err}",
+                            "Failed to commit recorded {label} to '{}': {e}",
                             p.display()
                         ),
                     }],
                     is_error: true,
                 };
             }
-            let _ = std::fs::remove_file(&temp_path);
+
+            (file_size as usize, None)
         }
-    }
+        RecordWriter::Memory(cursor) => {
+            let bytes = cursor.into_inner();
+            if bytes.len() > 100 * 1024 * 1024 {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text {
+                        text: format!(
+                            "Recorded animation size ({} MB) exceeds maximum allowed payload limit (100MB). Reduce duration or FPS.",
+                            bytes.len() / (1024 * 1024)
+                        ),
+                    }],
+                    is_error: true,
+                };
+            }
+
+            if let Some(ref p) = output_path {
+                let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+
+                let temp_name = format!(
+                    ".tmp_rec_{}_{}.tmp",
+                    std::process::id(),
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                );
+                let temp_path = parent.join(temp_name);
+
+                let write_res = std::fs::write(&temp_path, &bytes);
+                if let Err(e) = write_res {
+                    let _ = std::fs::remove_file(&temp_path);
+                    let label = if is_webp { "WebP" } else { "GIF" };
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!(
+                                "Failed to write recorded {label} to temporary file: {e}"
+                            ),
+                        }],
+                        is_error: true,
+                    };
+                }
+
+                let rename_res = std::fs::rename(&temp_path, p).or_else(|_| {
+                    std::fs::copy(&temp_path, p).map(|_| {
+                        let _ = std::fs::remove_file(&temp_path);
+                    })
+                });
+
+                if let Err(e) = rename_res {
+                    let _ = std::fs::remove_file(&temp_path);
+                    let label = if is_webp { "WebP" } else { "GIF" };
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!(
+                                "Failed to commit recorded {label} to '{}': {e}",
+                                p.display()
+                            ),
+                        }],
+                        is_error: true,
+                    };
+                }
+            }
+
+            let len = bytes.len();
+            (len, Some(bytes))
+        }
+    };
 
     let mut content = Vec::new();
     if return_base64 {
-        let b64 = base64_encode(&anim_bytes);
-        content.push(ToolContent::Image {
-            data: b64,
-            mime_type: if is_webp {
-                "image/webp".to_string()
-            } else {
-                "image/gif".to_string()
-            },
-        });
+        if let Some(ref bytes) = anim_bytes {
+            let b64 = base64_encode(bytes);
+            content.push(ToolContent::Image {
+                data: b64,
+                mime_type: if is_webp {
+                    "image/webp".to_string()
+                } else {
+                    "image/gif".to_string()
+                },
+            });
+        }
     }
 
     let save_msg = output_path
@@ -503,7 +644,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
             height,
             fps,
             start_time.elapsed().as_secs_f32(),
-            anim_bytes.len(),
+            total_size,
             format_label,
         ),
     });
@@ -511,5 +652,40 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     ToolCallResult {
         content,
         is_error: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_record_writer_file_and_memory_seek_write() {
+        use std::io::{Read, Seek, Write};
+        let mut mem = RecordWriter::Memory(std::io::Cursor::new(Vec::new()));
+        mem.write_all(b"hello world").unwrap();
+        mem.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut buf = Vec::new();
+        if let RecordWriter::Memory(ref mut c) = mem {
+            c.read_to_end(&mut buf).unwrap();
+        }
+        assert_eq!(&buf, b"hello world");
+
+        let temp_path =
+            std::env::temp_dir().join(format!("rgc_rec_writer_test_{}.tmp", std::process::id()));
+        {
+            let file = std::fs::File::create(&temp_path).unwrap();
+            let mut writer = RecordWriter::File {
+                writer: std::io::BufWriter::new(file),
+            };
+            writer.write_all(b"disk streaming data").unwrap();
+            writer.flush().unwrap();
+            writer.seek(std::io::SeekFrom::Start(5)).unwrap();
+            writer.write_all(b"_INJECTED_").unwrap();
+            writer.flush().unwrap();
+        }
+        let read_bytes = std::fs::read(&temp_path).unwrap();
+        assert_eq!(&read_bytes, b"disk _INJECTED_data");
+        let _ = std::fs::remove_file(&temp_path);
     }
 }
