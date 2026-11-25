@@ -1,5 +1,5 @@
 use crate::capture;
-use crate::cli::{CoordMode, MaskRegion, MaskWindow};
+use crate::cli::CoordMode;
 use crate::mcp::base64::base64_encode;
 use crate::mcp::types::{ToolCallResult, ToolContent, ToolDefinition};
 use crate::output;
@@ -99,6 +99,8 @@ enum RecordWriter {
     Memory(std::io::Cursor<Vec<u8>>),
     File {
         writer: std::io::BufWriter<std::fs::File>,
+        temp_path: std::path::PathBuf,
+        dest_path: std::path::PathBuf,
     },
 }
 
@@ -106,14 +108,14 @@ impl std::io::Write for RecordWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
             RecordWriter::Memory(c) => c.write(buf),
-            RecordWriter::File { writer } => writer.write(buf),
+            RecordWriter::File { writer, .. } => writer.write(buf),
         }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             RecordWriter::Memory(c) => c.flush(),
-            RecordWriter::File { writer } => writer.flush(),
+            RecordWriter::File { writer, .. } => writer.flush(),
         }
     }
 }
@@ -122,7 +124,7 @@ impl std::io::Seek for RecordWriter {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         match self {
             RecordWriter::Memory(c) => c.seek(pos),
-            RecordWriter::File { writer } => writer.seek(pos),
+            RecordWriter::File { writer, .. } => writer.seek(pos),
         }
     }
 }
@@ -237,66 +239,15 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .and_then(|v| v.as_bool())
         .unwrap_or(output_path.is_none());
 
-    let mut manual_masks = Vec::new();
-    if let Some(redacts_val) = arguments.get("redactions") {
-        if let Some(arr) = redacts_val.as_array() {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    match s.parse::<MaskRegion>() {
-                        Ok(mr) => manual_masks.push(mr),
-                        Err(e) => {
-                            return ToolCallResult {
-                                content: vec![ToolContent::Text {
-                                    text: format!("Invalid redaction '{s}': {e}"),
-                                }],
-                                is_error: true,
-                            };
-                        }
-                    }
-                }
-            }
+    let privacy_policy = match crate::mcp::validation::parse_mcp_privacy_policy(arguments) {
+        Ok(p) => p,
+        Err(e) => {
+            return ToolCallResult {
+                content: vec![ToolContent::Text { text: e }],
+                is_error: true,
+            };
         }
-    }
-
-    let mut window_masks = Vec::new();
-    if let Some(win_masks_val) = arguments.get("maskWindows") {
-        if let Some(arr) = win_masks_val.as_array() {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    match s.parse::<MaskWindow>() {
-                        Ok(mw) => window_masks.push(mw),
-                        Err(e) => {
-                            return ToolCallResult {
-                                content: vec![ToolContent::Text {
-                                    text: format!("Invalid maskWindows entry '{s}': {e}"),
-                                }],
-                                is_error: true,
-                            };
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let mut exclude_windows = Vec::new();
-    if let Some(arr) = arguments.get("excludeWindows").and_then(|v| v.as_array()) {
-        for item in arr {
-            if let Some(s) = item.as_str() {
-                exclude_windows.push(s.to_string());
-            }
-        }
-    }
-
-    let request_allow_missing = arguments.get("allowMissingMask").and_then(|v| v.as_bool());
-    let cfg = crate::config::get_active_config();
-    let privacy_policy = crate::config::PrivacyPolicy::from_config_and_request(
-        &cfg.privacy,
-        &window_masks,
-        &exclude_windows,
-        &manual_masks,
-        request_allow_missing,
-    );
+    };
 
     let interval = std::time::Duration::from_secs_f32(1.0 / fps as f32);
     let target_duration = std::time::Duration::from_secs_f32(duration_secs);
@@ -318,23 +269,26 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
         None
     };
 
-    let mut record_writer = if let Some(ref temp_path) = temp_file_path {
-        match std::fs::File::create(temp_path) {
-            Ok(file) => RecordWriter::File {
-                writer: std::io::BufWriter::with_capacity(128 * 1024, file),
-            },
-            Err(e) => {
-                return ToolCallResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Failed to create temporary recording file: {e}"),
-                    }],
-                    is_error: true,
-                };
+    let mut record_writer =
+        if let (Some(ref p), Some(ref temp_path)) = (&output_path, &temp_file_path) {
+            match std::fs::File::create(temp_path) {
+                Ok(file) => RecordWriter::File {
+                    writer: std::io::BufWriter::with_capacity(128 * 1024, file),
+                    temp_path: temp_path.clone(),
+                    dest_path: p.clone(),
+                },
+                Err(e) => {
+                    return ToolCallResult {
+                        content: vec![ToolContent::Text {
+                            text: format!("Failed to create temporary recording file: {e}"),
+                        }],
+                        is_error: true,
+                    };
+                }
             }
-        }
-    } else {
-        RecordWriter::Memory(std::io::Cursor::new(Vec::new()))
-    };
+        } else {
+            RecordWriter::Memory(std::io::Cursor::new(Vec::new()))
+        };
 
     let mut stream = if is_webp {
         match output::WebpStreamEncoder::new(&mut record_writer, fps) {
@@ -482,11 +436,14 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
     drop(stream);
 
     let (total_size, anim_bytes) = match record_writer {
-        RecordWriter::File { mut writer } => {
+        RecordWriter::File {
+            mut writer,
+            temp_path,
+            dest_path,
+        } => {
             use std::io::Write;
-            let temp_path = temp_file_path.as_deref().unwrap();
             if let Err(e) = writer.flush() {
-                cleanup_temp_file(Some(temp_path));
+                cleanup_temp_file(Some(&temp_path));
                 return ToolCallResult {
                     content: vec![ToolContent::Text {
                         text: format!("Failed to flush recorded temporary file: {e}"),
@@ -496,10 +453,10 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
             }
             drop(writer);
 
-            let file_size = match std::fs::metadata(temp_path) {
+            let file_size = match std::fs::metadata(&temp_path) {
                 Ok(m) => m.len(),
                 Err(e) => {
-                    cleanup_temp_file(Some(temp_path));
+                    cleanup_temp_file(Some(&temp_path));
                     return ToolCallResult {
                         content: vec![ToolContent::Text {
                             text: format!("Failed to read recorded temporary file metadata: {e}"),
@@ -510,7 +467,7 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
             };
 
             if file_size > 100 * 1024 * 1024 {
-                cleanup_temp_file(Some(temp_path));
+                cleanup_temp_file(Some(&temp_path));
                 return ToolCallResult {
                     content: vec![ToolContent::Text {
                         text: format!(
@@ -522,21 +479,20 @@ pub fn execute_record_tool(arguments: &serde_json::Value) -> ToolCallResult {
                 };
             }
 
-            let p = output_path.as_ref().unwrap();
-            let rename_res = std::fs::rename(temp_path, p).or_else(|_| {
-                std::fs::copy(temp_path, p).map(|_| {
-                    cleanup_temp_file(Some(temp_path));
+            let rename_res = std::fs::rename(&temp_path, &dest_path).or_else(|_| {
+                std::fs::copy(&temp_path, &dest_path).map(|_| {
+                    cleanup_temp_file(Some(&temp_path));
                 })
             });
 
             if let Err(e) = rename_res {
-                cleanup_temp_file(Some(temp_path));
+                cleanup_temp_file(Some(&temp_path));
                 let label = if is_webp { "WebP" } else { "GIF" };
                 return ToolCallResult {
                     content: vec![ToolContent::Text {
                         text: format!(
                             "Failed to commit recorded {label} to '{}': {e}",
-                            p.display()
+                            dest_path.display()
                         ),
                     }],
                     is_error: true,
@@ -677,6 +633,8 @@ mod tests {
             let file = std::fs::File::create(&temp_path).unwrap();
             let mut writer = RecordWriter::File {
                 writer: std::io::BufWriter::new(file),
+                temp_path: temp_path.clone(),
+                dest_path: temp_path.clone(),
             };
             writer.write_all(b"disk streaming data").unwrap();
             writer.flush().unwrap();

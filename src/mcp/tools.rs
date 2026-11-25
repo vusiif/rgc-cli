@@ -1,13 +1,14 @@
-use std::path::{Path, PathBuf};
 use std::str::FromStr;
-
-use image::DynamicImage;
 
 use crate::capture;
 use crate::cli::{CoordMode, ImageFormat, Region};
 use crate::doctor;
-use crate::mcp::base64::{base64_decode, base64_encode};
+use crate::mcp::base64::base64_encode;
 use crate::mcp::types::{ToolCallResult, ToolContent, ToolDefinition};
+pub use crate::mcp::validation::{load_untrusted_image_input, validate_mcp_output_path};
+use crate::mcp::validation::{
+    parse_mcp_privacy_policy, parse_optional_u32_range, parse_optional_u8_range,
+};
 use crate::output::{self, OutputDestination};
 
 pub fn json_tool_result<T: serde::Serialize>(val: &T) -> ToolCallResult {
@@ -351,197 +352,6 @@ pub fn execute_tool_call(name: &str, arguments: &serde_json::Value) -> ToolCallR
     }
 }
 
-/// Validate and sanitize output path requested by an MCP client to prevent path traversal
-/// and accidental data loss via unintended overwrites.
-pub fn validate_mcp_output_path(
-    path_str: &str,
-    allowed_extensions: &[&str],
-    allow_overwrite: bool,
-) -> Result<PathBuf, String> {
-    let trimmed = path_str.trim();
-    if trimmed.is_empty() {
-        return Err("Output path cannot be empty".to_string());
-    }
-
-    if trimmed.contains('\0') {
-        return Err("Output path contains illegal null bytes".to_string());
-    }
-
-    let p = Path::new(trimmed);
-
-    // Extension check
-    let ext = p
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-
-    if !allowed_extensions
-        .iter()
-        .any(|&allowed| allowed.eq_ignore_ascii_case(&ext))
-    {
-        return Err(format!(
-            "Invalid file extension '.{ext}'. Allowed extensions: {}",
-            allowed_extensions.join(", ")
-        ));
-    }
-
-    // Path traversal check: components must not escape using ParentDir ("..")
-    for comp in p.components() {
-        if matches!(comp, std::path::Component::ParentDir) {
-            return Err(format!(
-                "Path traversal ('..') is not permitted in outputPath: '{trimmed}'"
-            ));
-        }
-    }
-
-    // Allowed directories check (from active config and RGC_ALLOWED_OUTPUT_DIRS environment variable)
-    let active_cfg = crate::config::get_active_config();
-    let mut configured_allowed: Vec<String> = active_cfg.security.allowed_output_dirs.clone();
-    if let Ok(allowed_dirs_var) = std::env::var("RGC_ALLOWED_OUTPUT_DIRS") {
-        for part in allowed_dirs_var.split([',', ';']) {
-            let t = part.trim();
-            if !t.is_empty() {
-                configured_allowed.push(t.to_string());
-            }
-        }
-    }
-
-    if !configured_allowed.is_empty() {
-        let allowed_dirs: Vec<PathBuf> = configured_allowed
-            .iter()
-            .map(PathBuf::from)
-            .filter_map(|pb| pb.canonicalize().ok())
-            .collect();
-
-        if allowed_dirs.is_empty() {
-            return Err(format!(
-                "Allowed output directories configured ({configured_allowed:?}) but none are valid or accessible; refusing file write for security."
-            ));
-        }
-
-        let abs_path = if p.is_relative() {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(p))
-                .unwrap_or_else(|_| p.to_path_buf())
-        } else {
-            p.to_path_buf()
-        };
-
-        let parent_to_check = abs_path
-            .parent()
-            .and_then(|parent| parent.canonicalize().ok())
-            .unwrap_or_else(|| abs_path.clone());
-
-        let is_allowed = allowed_dirs
-            .iter()
-            .any(|allowed| parent_to_check.starts_with(allowed));
-
-        if !is_allowed {
-            return Err(format!(
-                "Target outputPath '{}' is outside allowed directories: {:?}",
-                trimmed, configured_allowed
-            ));
-        }
-    }
-
-    // Overwrite check
-    if !allow_overwrite && p.exists() {
-        return Err(format!(
-            "Target file already exists: '{}'. Set allowOverwrite=true to permit overwriting.",
-            p.display()
-        ));
-    }
-
-    Ok(p.to_path_buf())
-}
-
-/// Validate and safely load an untrusted image input from a base64 string or filesystem path.
-///
-/// Security constraints:
-/// - Base64 strings are capped at 32MB to prevent memory exhaustion DoS.
-/// - File paths are strictly forbidden from path traversal (`..`) and Windows device namespaces (`\\.\`, `//./`).
-/// - Decoded images are strictly protected against decompression bombs using reader limits
-///   (max width/height 16384, max allocation 256MB).
-pub fn load_untrusted_image_input(
-    input_str: &str,
-    param_name: &str,
-) -> Result<DynamicImage, String> {
-    let trimmed = input_str.trim();
-    if trimmed.is_empty() {
-        return Err(format!("Parameter '{param_name}' cannot be empty"));
-    }
-
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16384);
-    limits.max_image_height = Some(16384);
-    limits.max_alloc = Some(256 * 1024 * 1024);
-
-    let is_base64 = trimmed.starts_with("data:image/")
-        || (!trimmed.contains('/')
-            && !trimmed.contains('\\')
-            && !trimmed.contains('.')
-            && trimmed.len() > 100);
-
-    let img = if is_base64 {
-        let raw_b64 = if let Some((_, rest)) = trimmed.split_once(";base64,") {
-            rest.trim()
-        } else {
-            trimmed
-        };
-
-        if raw_b64.len() > 32 * 1024 * 1024 {
-            return Err(format!(
-                "Base64 image payload in '{param_name}' exceeds maximum allowed size (32MB)"
-            ));
-        }
-
-        let bytes =
-            base64_decode(raw_b64).map_err(|e| format!("Invalid base64 in '{param_name}': {e}"))?;
-
-        let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes));
-        reader.limits(limits);
-        let reader = reader
-            .with_guessed_format()
-            .map_err(|e| format!("Failed to guess image format in '{param_name}': {e}"))?;
-        reader
-            .decode()
-            .map_err(|e| format!("Failed to decode image from memory in '{param_name}': {e}"))?
-    } else {
-        if trimmed.starts_with(r"\\.\") || trimmed.starts_with("//./") {
-            return Err(format!(
-                "Device paths are not permitted in '{param_name}': '{trimmed}'"
-            ));
-        }
-
-        let p = Path::new(trimmed);
-        for comp in p.components() {
-            if matches!(comp, std::path::Component::ParentDir) {
-                return Err(format!(
-                    "Path traversal ('..') is not permitted in '{param_name}': '{trimmed}'"
-                ));
-            }
-        }
-
-        let mut reader = image::ImageReader::open(p)
-            .map_err(|e| format!("Failed to open image from '{trimmed}' in '{param_name}': {e}"))?;
-        reader.limits(limits);
-        reader.decode().map_err(|e| {
-            format!("Failed to decode image from '{trimmed}' in '{param_name}': {e}")
-        })?
-    };
-
-    if img.width() > 16384 || img.height() > 16384 {
-        return Err(format!(
-            "Image dimensions ({}x{}) in '{param_name}' exceed maximum allowed size (16384x16384)",
-            img.width(),
-            img.height()
-        ));
-    }
-
-    Ok(img)
-}
-
 pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
     let monitor = if let Some(m_val) = arguments.get("monitor") {
         if let Some(idx) = m_val.as_u64() {
@@ -628,35 +438,25 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         }
     }
 
-    let max_dimension = arguments
-        .get("maxDimension")
-        .and_then(|v| v.as_u64())
-        .map(|d| d as u32);
-    if let Some(d) = max_dimension {
-        if d == 0 || d > 16384 {
+    let max_dimension = match parse_optional_u32_range(arguments, "maxDimension", 1, 16384) {
+        Ok(d) => d,
+        Err(e) => {
             return ToolCallResult {
-                content: vec![ToolContent::Text {
-                    text: format!("Invalid maxDimension: must be between 1 and 16384 (got {d})"),
-                }],
+                content: vec![ToolContent::Text { text: e }],
                 is_error: true,
             };
         }
-    }
+    };
 
-    let quality = arguments
-        .get("quality")
-        .and_then(|v| v.as_u64())
-        .map(|q| q as u8);
-    if let Some(q) = quality {
-        if q == 0 || q > 100 {
+    let quality = match parse_optional_u8_range(arguments, "quality", 1, 100) {
+        Ok(q) => q,
+        Err(e) => {
             return ToolCallResult {
-                content: vec![ToolContent::Text {
-                    text: "Invalid quality: must be between 1 and 100".to_string(),
-                }],
+                content: vec![ToolContent::Text { text: e }],
                 is_error: true,
             };
         }
-    }
+    };
 
     let allow_overwrite = arguments
         .get("allowOverwrite")
@@ -754,14 +554,6 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         .get("accessibility")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let mut exclude_windows = Vec::new();
-    if let Some(arr) = arguments.get("excludeWindows").and_then(|v| v.as_array()) {
-        for item in arr {
-            if let Some(s) = item.as_str() {
-                exclude_windows.push(s.to_string());
-            }
-        }
-    }
     let diff_with_str = arguments.get("diffWith").and_then(|v| v.as_str());
 
     // Validate and preload reference diff image early to fail fast before capture
@@ -818,130 +610,25 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
         None
     };
 
-    let mut manual_masks = Vec::new();
-    if let Some(redacts_val) = arguments.get("redactions") {
-        if let Some(arr) = redacts_val.as_array() {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    match s.parse::<crate::cli::MaskRegion>() {
-                        Ok(mr) => manual_masks.push(mr),
-                        Err(e) => {
-                            return ToolCallResult {
-                                content: vec![ToolContent::Text {
-                                    text: format!("Invalid redaction '{s}': {e}"),
-                                }],
-                                is_error: true,
-                            };
-                        }
-                    }
-                } else if let Some(obj) = item.as_object() {
-                    let reg_str = match obj.get("region").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => {
-                            return ToolCallResult {
-                                content: vec![ToolContent::Text {
-                                    text: "Invalid redaction object: missing 'region' field"
-                                        .to_string(),
-                                }],
-                                is_error: true,
-                            };
-                        }
-                    };
-                    let effect = if let Some(eff_str) = obj.get("effect").and_then(|v| v.as_str()) {
-                        match eff_str.parse::<crate::cli::MaskEffect>() {
-                            Ok(eff) => eff,
-                            Err(e) => {
-                                return ToolCallResult {
-                                    content: vec![ToolContent::Text {
-                                        text: format!("Invalid redaction effect '{eff_str}': {e}"),
-                                    }],
-                                    is_error: true,
-                                };
-                            }
-                        }
-                    } else {
-                        crate::cli::MaskEffect::Transparent
-                    };
-                    let region = match Region::from_str(reg_str) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            return ToolCallResult {
-                                content: vec![ToolContent::Text {
-                                    text: format!("Invalid redaction region '{reg_str}': {e}"),
-                                }],
-                                is_error: true,
-                            };
-                        }
-                    };
-                    manual_masks.push(crate::cli::MaskRegion { region, effect });
-                } else {
-                    return ToolCallResult {
-                        content: vec![ToolContent::Text {
-                            text: format!(
-                                "Invalid redaction entry '{item}': expected string or object"
-                            ),
-                        }],
-                        is_error: true,
-                    };
-                }
-            }
+    let privacy_policy = match parse_mcp_privacy_policy(arguments) {
+        Ok(p) => p,
+        Err(e) => {
+            return ToolCallResult {
+                content: vec![ToolContent::Text { text: e }],
+                is_error: true,
+            };
         }
-    }
+    };
 
-    let mut window_masks = Vec::new();
-    if let Some(win_masks_val) = arguments.get("maskWindows") {
-        if let Some(arr) = win_masks_val.as_array() {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    match s.parse::<crate::cli::MaskWindow>() {
-                        Ok(mw) => window_masks.push(mw),
-                        Err(e) => {
-                            return ToolCallResult {
-                                content: vec![ToolContent::Text {
-                                    text: format!("Invalid maskWindows entry '{s}': {e}"),
-                                }],
-                                is_error: true,
-                            };
-                        }
-                    }
-                } else if let Some(obj) = item.as_object() {
-                    let win_str = match obj.get("window").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => {
-                            return ToolCallResult {
-                                content: vec![ToolContent::Text {
-                                    text: "Invalid maskWindows object: missing 'window' field"
-                                        .to_string(),
-                                }],
-                                is_error: true,
-                            };
-                        }
-                    };
-                    let effect = if let Some(eff_str) = obj.get("effect").and_then(|v| v.as_str()) {
-                        match eff_str.parse::<crate::cli::MaskEffect>() {
-                            Ok(eff) => eff,
-                            Err(e) => {
-                                return ToolCallResult {
-                                    content: vec![ToolContent::Text {
-                                        text: format!(
-                                            "Invalid maskWindows effect '{eff_str}': {e}"
-                                        ),
-                                    }],
-                                    is_error: true,
-                                };
-                            }
-                        }
-                    } else {
-                        crate::cli::MaskEffect::Transparent
-                    };
-                    window_masks.push(crate::cli::MaskWindow {
-                        query: win_str.to_string(),
-                        effect,
-                    });
-                }
-            }
+    let around_cursor = match parse_optional_u32_range(arguments, "aroundCursor", 10, 4096) {
+        Ok(r) => r,
+        Err(e) => {
+            return ToolCallResult {
+                content: vec![ToolContent::Text { text: e }],
+                is_error: true,
+            };
         }
-    }
+    };
 
     let all_monitors = arguments
         .get("allMonitors")
@@ -1067,21 +754,6 @@ pub fn execute_capture_tool(arguments: &serde_json::Value) -> ToolCallResult {
             }
         }
     };
-
-    let request_allow_missing = arguments.get("allowMissingMask").and_then(|v| v.as_bool());
-    let cfg = crate::config::get_active_config();
-    let privacy_policy = crate::config::PrivacyPolicy::from_config_and_request(
-        &cfg.privacy,
-        &window_masks,
-        &exclude_windows,
-        &manual_masks,
-        request_allow_missing,
-    );
-
-    let around_cursor = arguments
-        .get("aroundCursor")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
 
     let pipeline_options = crate::pipeline::PipelineOptions {
         cursor: cursor_flag,

@@ -61,12 +61,16 @@ Options:
       --list-windows          List all active application windows and exit
   -m, --monitor <INDEX>       Monitor index to capture (0-indexed). Defaults to primary monitor
   -w, --window <ID|TITLE>     Capture a specific window by ID or title substring (e.g. -w 1234 or -w "Code")
-      --client-only           Capture only the application window client/working area (trims system drop shadows and titlebars, requires -w)
-  -a, --all-monitors          Capture all connected monitors stitched into a virtual desktop panorama (conflicts with -m, -w)
+      --active-window         Capture currently focused/active desktop window (alias: --active)
+      --client-only           Capture only the application window client/working area (trims system drop shadows and titlebars, requires -w or --active-window)
+  -a, --all-monitors          Capture all connected monitors stitched into a virtual desktop panorama (conflicts with -m, -w, --active-window)
   -r, --region <x,y,w,h>      Region to capture in coordinates: 'x,y,w,h' (e.g. 100,100,800,600)
+      --around-cursor [RAD]   Dynamically crop a square bounding box centered around the mouse cursor (default radius: 200px, range: 10..=4096)
       --coords <MODE>         Coordinate system for region: 'logical' (default, scaled by DPI) or 'physical' (raw pixels)
       --mask <x,y,w,h[:effect]> Redact rectangular region(s): 'x,y,w,h[:effect]' (effect: transparent, blackout, pixelate, blur; default: transparent)
       --mask-window <TARGET>  Auto-detect window bounds & redact: 'ID|TITLE[:effect]' (effect: transparent, blackout, pixelate, blur; default: transparent)
+      --exclude-window <T>    Exclude active window(s) completely from captured screen by title substring or ID
+      --allow-missing-mask    Allow export to proceed if --mask-window target is not found (default: fail-closed)
   -o, --output <PATH>         Output file path, directory, or '-' for stdout stream. Defaults to timestamped file in CWD
       --output-file <FILE>    Explicit output file destination (creates parent directories if missing)
       --output-dir <DIR>      Explicit output directory destination (timestamped filename generated inside)
@@ -81,10 +85,15 @@ Options:
       --diff-threshold <0-255> Pixel difference tolerance threshold (default: 16)
       --crop-changed          Crop output to only the bounding box of changed pixels (requires --diff-with)
       --highlight-diff        Draw a prominent high-contrast boundary box on the image around differences (requires --diff-with)
+      --tile-diff             Compute discrete spatial diff tiles against reference image (--diff-with)
+      --tile-size <PIXELS>    Tile size in pixels for spatial tile diff calculation (default: 32)
       --timestamp             Burn a UTC/local timestamp watermark badge onto the output screenshot
       --tag <TEXT>            Burn a custom text tag (e.g. step name, session ID) onto the output screenshot
       --wait-change           Wait for screen/window visual change before capturing (ideal for UI automation)
-      --wait-timeout <MS>     Maximum timeout in ms to wait for a visual change before capturing (default: 5000)
+      --wait-stable <MS>      Wait for screen/window to become visually stable (no changes for MS ms) before capturing
+      --wait-window <TARGET>  Wait for window matching query to appear and be visible before capturing
+      --wait-template <PATH>  Wait for template image to appear before capturing
+      --wait-timeout <MS>     Maximum timeout in ms to wait for a visual change or condition before capturing (default: 5000)
       --wait-interval <MS>    Polling interval in ms between change detection checks (default: 100)
       --cursor                Capture and render mouse cursor on the screenshot
       --highlight-cursor      Render a prominent visual highlight ring around the mouse cursor
@@ -93,12 +102,20 @@ Options:
       --som                   Detect interactive UI elements and overlay Set-of-Mark (SoM) numbered badges for AI navigation
       --som-threshold <1-100> Sensitivity threshold for UI element detection (default: 25)
       --som-max-elements <N>  Maximum number of UI elements to detect and mark (default: 50)
+      --accessibility         Fuse UI automation accessibility tree semantics with Set-of-Mark detections (alias: --a11y)
+      --find-template <PATH>  Locate a template or icon image on the screen and return its exact coordinates
+      --template-threshold <F> Minimum confidence threshold for template matching (0.0-1.0, default: 0.85)
+      --template-max-matches <N> Maximum number of matching template occurrences to locate (default: 1)
+      --highlight-template    Overlay bounding box and confidence score badges onto matched template locations
       --click-at <X,Y[,L]>    Overlay a visual click ripple and target indicator at coordinate X,Y
       --drag <X1,Y1,X2,Y2[,L]> Overlay a visual drag trajectory arrow between coordinates
       --verify-click <X,Y>    Verify whether a visual change occurred within a radius around X,Y after interaction
       --verify-radius <PX>    Search radius in pixels for action verification (default: 100, 0 for full screen)
       --verify-timeout <MS>   Wait duration in milliseconds before sampling follow-up state (default: 500 ms)
       --verify-threshold <N>  Color difference threshold (1-255, default: 10) for action change verification
+      --config <PATH>         Optional path to configuration file (defaults to ./rgc.toml or ~/.config/rgc/config.toml)
+      --watch [INTERVAL_MS]   Continuous watch mode: poll screen periodically and emit events/files on visual change
+      --benchmark [RUNS]      Run comprehensive performance and latency benchmarks (capture, processing, encoders)
       --open                  Open captured screenshot file with system default viewer
       --completions <SHELL>   Generate shell completion script to stdout [possible values: bash, elvish, fish, powershell, zsh]
       --json                  Output result as structured JSON (ideal for automation & AI agents)

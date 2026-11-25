@@ -6,6 +6,7 @@ pub mod resources;
 pub mod session;
 pub mod tools;
 pub mod types;
+pub mod validation;
 
 pub use base64::*;
 pub use prompts::*;
@@ -13,6 +14,7 @@ pub use resources::*;
 pub use session::*;
 pub use tools::*;
 pub use types::*;
+pub use validation::*;
 
 use log::{debug, error, info};
 use std::io::{BufRead, Write};
@@ -835,6 +837,7 @@ mod tests {
         let _ = std::fs::remove_file(temp_file);
 
         // Allowed output directories enforcement
+        let _guard = crate::mcp::validation::ENV_TEST_LOCK.lock().unwrap();
         let allowed_dir = std::env::temp_dir();
         std::env::set_var("RGC_ALLOWED_OUTPUT_DIRS", &allowed_dir);
 
@@ -915,6 +918,7 @@ mod tests {
 
     #[test]
     fn test_allowed_output_dirs_fail_closed_on_invalid_dirs() {
+        let _guard = crate::mcp::validation::ENV_TEST_LOCK.lock().unwrap();
         // Configure an invalid non-existent directory
         std::env::set_var(
             "RGC_ALLOWED_OUTPUT_DIRS",
@@ -1048,10 +1052,16 @@ mod tests {
 
     #[test]
     fn test_mcp_capture_screen_with_active_window_or_around_cursor() {
-        // Validation with invalid aroundCursor type
+        // Invalid aroundCursor type must be rejected explicitly
         let req = r#"{"jsonrpc":"2.0","id":91,"method":"tools/call","params":{"name":"capture_screen","arguments":{"aroundCursor":"not_a_number"}}}"#;
         let resp = handle_mcp_message(req).expect("response expected");
-        // aroundCursor as string is ignored (or None), falling back to normal capture or failing appropriately
-        assert!(resp.contains("jsonrpc"));
+        assert!(resp.contains(r#""isError":true"#));
+        assert!(resp.contains("Invalid aroundCursor"));
+
+        // Out-of-range aroundCursor must be rejected explicitly
+        let req_range = r#"{"jsonrpc":"2.0","id":92,"method":"tools/call","params":{"name":"capture_screen","arguments":{"aroundCursor":5}}}"#;
+        let resp_range = handle_mcp_message(req_range).expect("response expected");
+        assert!(resp_range.contains(r#""isError":true"#));
+        assert!(resp_range.contains("Invalid aroundCursor"));
     }
 }

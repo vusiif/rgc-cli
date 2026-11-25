@@ -346,20 +346,17 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         }
     }
 
-    let max_dimension = arguments
-        .get("maxDimension")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
-    if let Some(d) = max_dimension {
-        if d == 0 || d > 16384 {
-            return ToolCallResult {
-                content: vec![ToolContent::Text {
-                    text: format!("Invalid maxDimension: must be between 1 and 16384 (got {d})"),
-                }],
-                is_error: true,
-            };
-        }
-    }
+    let max_dimension =
+        match crate::mcp::validation::parse_optional_u32_range(arguments, "maxDimension", 1, 16384)
+        {
+            Ok(d) => d,
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text { text: e }],
+                    is_error: true,
+                };
+            }
+        };
 
     let cursor_flag = arguments
         .get("cursor")
@@ -382,46 +379,15 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         _ => None,
     };
 
-    let mut manual_masks = Vec::new();
-    if let Some(arr) = arguments.get("redactions").and_then(|v| v.as_array()) {
-        for item in arr {
-            if let Some(s) = item.as_str() {
-                if let Ok(mr) = s.parse::<crate::cli::MaskRegion>() {
-                    manual_masks.push(mr);
-                }
-            }
+    let privacy_policy = match crate::mcp::validation::parse_mcp_privacy_policy(arguments) {
+        Ok(p) => p,
+        Err(e) => {
+            return ToolCallResult {
+                content: vec![ToolContent::Text { text: e }],
+                is_error: true,
+            };
         }
-    }
-
-    let mut window_masks = Vec::new();
-    if let Some(arr) = arguments.get("maskWindows").and_then(|v| v.as_array()) {
-        for item in arr {
-            if let Some(s) = item.as_str() {
-                if let Ok(mw) = s.parse::<crate::cli::MaskWindow>() {
-                    window_masks.push(mw);
-                }
-            }
-        }
-    }
-
-    let mut exclude_windows = Vec::new();
-    if let Some(arr) = arguments.get("excludeWindows").and_then(|v| v.as_array()) {
-        for item in arr {
-            if let Some(s) = item.as_str() {
-                exclude_windows.push(s.to_string());
-            }
-        }
-    }
-
-    let request_allow_missing = arguments.get("allowMissingMask").and_then(|v| v.as_bool());
-    let cfg = crate::config::get_active_config();
-    let privacy_policy = crate::config::PrivacyPolicy::from_config_and_request(
-        &cfg.privacy,
-        &window_masks,
-        &exclude_windows,
-        &manual_masks,
-        request_allow_missing,
-    );
+    };
 
     let allow_overwrite = arguments
         .get("allowOverwrite")
@@ -454,10 +420,17 @@ pub fn execute_capture_session_tool(arguments: &serde_json::Value) -> ToolCallRe
         .get("clientOnly")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let around_cursor = arguments
-        .get("aroundCursor")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
+    let around_cursor =
+        match crate::mcp::validation::parse_optional_u32_range(arguments, "aroundCursor", 10, 4096)
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return ToolCallResult {
+                    content: vec![ToolContent::Text { text: e }],
+                    is_error: true,
+                };
+            }
+        };
 
     let target = if active_window {
         capture::CaptureTarget::ActiveWindow { client_only }

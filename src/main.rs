@@ -822,7 +822,16 @@ fn run_recording(
         );
     }
 
-    let (_is_dir_output, dir_target, anim_target, is_webp) = match destination {
+    enum RecordTarget {
+        Directory(PathBuf),
+        Animation {
+            path: PathBuf,
+            stream: output::RecordingStreamEncoder<std::io::BufWriter<std::fs::File>>,
+            is_webp: bool,
+        },
+    }
+
+    let mut record_target = match destination {
         OutputDestination::Directory(ref dir) => {
             if !dir.exists() {
                 fs::create_dir_all(dir).map_err(|e| {
@@ -832,7 +841,7 @@ fn run_recording(
                     )
                 })?;
             }
-            (true, Some(dir.clone()), None, false)
+            RecordTarget::Directory(dir.clone())
         }
         OutputDestination::File(p) => {
             let is_webp = p
@@ -840,7 +849,18 @@ fn run_recording(
                 .and_then(|ext| ext.to_str())
                 .map(|ext| ext.eq_ignore_ascii_case("webp"))
                 .unwrap_or(args.format == Some(ImageFormat::Webp));
-            (false, None, Some(p), is_webp)
+            let stream =
+                output::RecordingStreamEncoder::create_file(&p, fps, is_webp).map_err(|e| {
+                    ApiError::new(
+                        ErrorCode::SaveFailed,
+                        format!("Failed to initialize streaming recording encoder: {e}"),
+                    )
+                })?;
+            RecordTarget::Animation {
+                path: p,
+                stream,
+                is_webp,
+            }
         }
         _ => {
             let format = if args.format == Some(ImageFormat::Webp) {
@@ -848,27 +868,21 @@ fn run_recording(
             } else {
                 ImageFormat::Gif
             };
-            let filename = output::generate_default_filename(format);
-            (
-                false,
-                None,
-                Some(PathBuf::from(filename)),
-                format == ImageFormat::Webp,
-            )
+            let path = PathBuf::from(output::generate_default_filename(format));
+            let is_webp = format == ImageFormat::Webp;
+            let stream =
+                output::RecordingStreamEncoder::create_file(&path, fps, is_webp).map_err(|e| {
+                    ApiError::new(
+                        ErrorCode::SaveFailed,
+                        format!("Failed to initialize streaming recording encoder: {e}"),
+                    )
+                })?;
+            RecordTarget::Animation {
+                path,
+                stream,
+                is_webp,
+            }
         }
-    };
-
-    let mut anim_stream = if let Some(ref path) = anim_target {
-        Some(
-            output::RecordingStreamEncoder::create_file(path, fps, is_webp).map_err(|e| {
-                ApiError::new(
-                    ErrorCode::SaveFailed,
-                    format!("Failed to initialize streaming recording encoder: {e}"),
-                )
-            })?,
-        )
-    } else {
-        None
     };
 
     let frame_options = pipeline::RecordingFrameOptions {
@@ -909,22 +923,25 @@ fn run_recording(
         stream_dims = (rgba.width(), rgba.height());
         frame_count += 1;
 
-        if let Some(ref mut stream) = anim_stream {
-            stream.encode_frame(&rgba).map_err(|e| {
-                ApiError::new(
-                    ErrorCode::SaveFailed,
-                    format!("Failed to encode streaming recording frame #{frame_count}: {e}"),
-                )
-            })?;
-        } else if let Some(ref dir) = dir_target {
-            let filename = format!("frame_{:04}.png", frame_count);
-            let frame_path = dir.join(filename);
-            output::save_image(
-                &DynamicImage::ImageRgba8(rgba),
-                &OutputDestination::File(frame_path),
-                ImageFormat::Png,
-                None,
-            )?;
+        match record_target {
+            RecordTarget::Animation { ref mut stream, .. } => {
+                stream.encode_frame(&rgba).map_err(|e| {
+                    ApiError::new(
+                        ErrorCode::SaveFailed,
+                        format!("Failed to encode streaming recording frame #{frame_count}: {e}"),
+                    )
+                })?;
+            }
+            RecordTarget::Directory(ref dir) => {
+                let filename = format!("frame_{:04}.png", frame_count);
+                let frame_path = dir.join(filename);
+                output::save_image(
+                    &DynamicImage::ImageRgba8(rgba),
+                    &OutputDestination::File(frame_path),
+                    ImageFormat::Png,
+                    None,
+                )?;
+            }
         }
 
         let elapsed = frame_start.elapsed();
@@ -940,36 +957,39 @@ fn run_recording(
         ));
     }
 
-    let (saved_path_buf, file_size_bytes) = if let Some(path) = anim_target {
-        if let Some(ref mut stream) = anim_stream {
+    let (saved_path_buf, file_size_bytes) = match record_target {
+        RecordTarget::Animation {
+            path,
+            mut stream,
+            is_webp,
+        } => {
             stream.finish().map_err(|e| {
                 ApiError::new(
                     ErrorCode::SaveFailed,
                     format!("Failed to finalize recording stream: {e}"),
                 )
             })?;
+            let size = fs::metadata(&path).ok().map(|m| m.len());
+            if !args.quiet && !args.json {
+                let label = if is_webp {
+                    "animated WebP"
+                } else {
+                    "animated GIF"
+                };
+                println!("Recording saved as {label}: {}", path.display());
+            }
+            (path, size)
         }
-        drop(anim_stream);
-        let size = fs::metadata(&path).ok().map(|m| m.len());
-        if !args.quiet && !args.json {
-            let label = if is_webp {
-                "animated WebP"
-            } else {
-                "animated GIF"
-            };
-            println!("Recording saved as {label}: {}", path.display());
+        RecordTarget::Directory(dir) => {
+            if !args.quiet && !args.json {
+                println!(
+                    "Recorded {} frames saved to directory: {}",
+                    frame_count,
+                    dir.display()
+                );
+            }
+            (dir, None)
         }
-        (path, size)
-    } else {
-        let dir = dir_target.unwrap();
-        if !args.quiet && !args.json {
-            println!(
-                "Recorded {} frames saved to directory: {}",
-                frame_count,
-                dir.display()
-            );
-        }
-        (dir, None)
     };
 
     if args.json {
