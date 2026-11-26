@@ -61,12 +61,16 @@ cargo build --release
       --list-windows          列出所有活动的应用程序窗口并退出
   -m, --monitor <INDEX>       指定要捕获的显示器索引 (从 0 开始，默认为主显示器)
   -w, --window <ID|TITLE>     通过窗口 ID 或标题子串捕获特定窗口 (如 -w 1234 或 -w "Code")
-      --client-only           仅截取应用程序客户区/工作画布 (自动剔除 OS 透明阴影留白与标题栏，需搭配 -w)
-  -a, --all-monitors          捕获所有已连接显示器并自动拼接为虚拟桌面全景大图 (与 -m、-w 互斥)
+      --active-window         自动捕获当前聚焦/活动桌面窗口 (别名: --active)
+      --client-only           仅截取应用程序客户区/工作画布 (自动剔除 OS 透明阴影留白与标题栏，需搭配 -w 或 --active-window)
+  -a, --all-monitors          捕获所有已连接显示器并自动拼接为虚拟桌面全景大图 (与 -m、-w、--active-window 互斥)
   -r, --region <x,y,w,h>      指定截取矩形区域坐标: 'x,y,w,h' (例如 '100,100,800,600')
+      --around-cursor [RAD]   围绕鼠标光标动态裁切正方形微视野区域 (默认半径: 200 像素，有效范围: 10..=4096)
       --coords <MODE>         区域坐标系: 'logical' (默认，按 DPI 缩放) 或 'physical' (原始物理像素)
       --mask <x,y,w,h[:effect]> 敏感区域脱敏遮罩: 'x,y,w,h[:effect]' (effect: transparent, blackout, pixelate, blur; 默认: transparent)
       --mask-window <TARGET>  自动定位窗口并脱敏: 'ID|TITLE[:effect]' (effect: transparent, blackout, pixelate, blur; 默认: transparent)
+      --exclude-window <T>    通过标题子串或 ID 从捕获画面中完全剔除指定活动窗口
+      --allow-missing-mask    当指定的 --mask-window 目标不存在时仍允许导出 (默认 fail-closed 保护隐私)
   -o, --output <PATH>         输出文件路径、目录或 '-' (流式输出至 stdout)。默认为当前目录带时间戳文件
       --output-file <FILE>    显式指定输出文件目标 (若父目录不存在将自动创建)
       --output-dir <DIR>      显式指定输出目录目标 (在指定目录内生成防重时间戳文件)
@@ -81,10 +85,15 @@ cargo build --release
       --diff-threshold <0-255> 像素比对差异容差阈值 (默认 16)
       --crop-changed          自动裁剪至发生变动的最小外接矩形 (需配合 --diff-with)
       --highlight-diff        在图像上绘制高对比度红框突出显示变动区域 (需配合 --diff-with)
+      --tile-diff             与参考图 (--diff-with) 计算离散空间分块差异瓦片
+      --tile-size <PIXELS>    空间瓦片差异计算的瓦片尺寸 (默认: 32 像素)
       --timestamp             在输出截图右下角叠加印制时间戳水印徽标
       --tag <TEXT>            在输出截图右下角叠加印制自定义文本标签 (如步骤名称、会话ID)
       --wait-change           等待屏幕/窗口发生视觉变动后立即捕获 (适合 UI 自动化与点击响应确认)
-      --wait-timeout <MS>     等待视觉变动的最大超时毫秒数 (默认 5000 毫秒)
+      --wait-stable <MS>      等待屏幕/窗口视觉稳定 (连续 MS 毫秒无变化) 后再捕获
+      --wait-window <TARGET>  等待匹配查询的窗口出现并可见后再捕获
+      --wait-template <PATH>  等待指定模板图像在画面中出现后再捕获
+      --wait-timeout <MS>     等待视觉变动或条件就绪的最大超时毫秒数 (默认 5000 毫秒)
       --wait-interval <MS>    变动检测轮询间隔毫秒数 (默认 100 毫秒)
       --cursor                捕获并在截图中渲染鼠标光标箭头
       --highlight-cursor      在鼠标光标周围渲染醒目的琥珀金色聚焦光环
@@ -93,12 +102,20 @@ cargo build --release
       --som                   自动检测可交互 UI 控件并叠加 Set-of-Mark (SoM) 编号徽标
       --som-threshold <1-100> 控件边缘检测灵敏度阈值 (默认 25)
       --som-max-elements <N>  最大标注控件元素数量 (默认 50)
+      --accessibility         将 UI 自动化无障碍树语义与 Set-of-Mark 检测结果融合 (别名: --a11y)
+      --find-template <PATH>  在屏幕中定位指定模板或图标并返回其精确坐标
+      --template-threshold <F> 模板匹配最小置信度阈值 (0.0-1.0，默认 0.85)
+      --template-max-matches <N> 最大返回匹配模板数量 (默认 1)
+      --highlight-template    在匹配到的模板位置叠加边界框与置信度徽标
       --click-at <X,Y[,L]>    在截图标注点击波纹扩散环与目标靶心 (格式: X,Y 或 X,Y,标签)
       --drag <X1,Y1,X2,Y2[,L]> 在截图标注拖拽/手势轨迹虚线与导向箭头
       --verify-click <X,Y>    验证交互后指定坐标半径区域内是否发生真实界面视觉变动
       --verify-radius <PX>    交互效果验证检测半径 (默认 100 像素，0 为全屏)
       --verify-timeout <MS>   二次采样等待超时毫秒数 (默认 500 毫秒)
       --verify-threshold <N>  交互变动检测色差阈值 (1-255，默认 10)
+      --config <PATH>         可选配置文件路径 (默认读取 ./rgc.toml 或 ~/.config/rgc/config.toml)
+      --watch [INTERVAL_MS]   持续监听模式: 周期性轮询画面并在视觉变动时输出事件或截图文件
+      --benchmark [RUNS]      运行综合性能与延迟基准测试 (捕获、管线处理、编码器吞吐)
       --open                  截图保存后自动调用系统默认查看器打开
       --completions <SHELL>   生成终端 Tab 自动补全脚本到 stdout [可选: bash, elvish, fish, powershell, zsh]
       --json                  以结构化 JSON 格式输出结果 (非常适合自动化与 AI 智能体)
